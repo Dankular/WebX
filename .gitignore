@@ -1,0 +1,15 @@
+# Large binary disk images — do not commit
+steam/*.img
+steam/*.ext2
+steam/*.qcow2
+steam/*.bz2
+steam/*.iso
+
+# Build output
+build/
+node_modules/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db

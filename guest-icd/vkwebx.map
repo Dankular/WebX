@@ -1,0 +1,6 @@
+{ global:
+    vk_icdGetInstanceProcAddr;
+    vk_icdNegotiateLoaderICDInterfaceVersion;
+    vk_icdGetPhysicalDeviceProcAddr;
+  local: *;
+};

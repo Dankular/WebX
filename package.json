@@ -1,0 +1,17 @@
+{
+  "name": "webx",
+  "version": "0.1.0",
+  "description": "Web-based DirectX/Steam game rendering via CheerpX + Proton + WebGPU",
+  "type": "module",
+  "scripts": {
+    "dev":              "node harness/server.mjs",
+    "extract:image":    "python steam/extract-image.py",
+    "extract:rootfs":   "bash steam/extract-rootfs.sh steam/steamdeck-repair.img steam/",
+    "build:icd":           "cmake -B build/guest-icd guest-icd/ -DCMAKE_TOOLCHAIN_FILE=cmake/x86_64-linux-gnu.cmake -DCMAKE_BUILD_TYPE=Release && cmake --build build/guest-icd",
+    "build:icd:docker":    "docker run --rm -v .:/work ubuntu:24.04 bash -c 'apt-get install -yq cmake gcc-x86-64-linux-gnu libvulkan-dev && cd /work && npm run build:icd'",
+    "build:vkwebgpu:linux": "bash steam/build-vkwebgpu.sh"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
