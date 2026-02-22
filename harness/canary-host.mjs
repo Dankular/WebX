@@ -63,6 +63,15 @@ const TCP_PROXY_BASE = 'ws://localhost:3001/tcp';
 /* Compiled WebAssembly.Module cached for sharing with thread Workers. */
 let _wasmModule = null;
 
+/*
+ * SharedArrayBuffer-backed WebAssembly.Memory, present only when Canary is
+ * built with the pkg-threads target (+atomics,+bulk-memory,+mutable-globals).
+ * When non-null, all Workers receive the same backing buffer so guest memory
+ * is truly shared (CLONE_VM semantics). With the standard single-threaded
+ * build this stays null and Workers run isolated address spaces.
+ */
+let _wasmMemory = null;
+
 /* Active thread Workers, keyed by guest TID. */
 const _workers = new Map();
 
@@ -108,6 +117,19 @@ export async function boot(canvas, consoleEl) {
         }
     }
 
+    /*
+     * Extract shared memory if available (pkg-threads build only).
+     * The threads build initialises WASM with a SharedArrayBuffer-backed
+     * WebAssembly.Memory so all Workers see the same guest address space.
+     * The standard build returns a regular (non-shared) memory; we leave
+     * _wasmMemory null in that case so Workers fall back to isolated mode.
+     */
+    const rawMem = wasmInitResult?.memory ?? wasmInitResult?.instance?.exports?.memory;
+    if (rawMem?.buffer instanceof SharedArrayBuffer) {
+        _wasmMemory = rawMem;
+        console.log('[WebX] Shared WASM memory detected — Workers will share guest address space.');
+    }
+
     const { CanaryRuntime } = wasmMod;
     const rt = new CanaryRuntime();
     console.log('[WebX] Canary runtime ready.');
@@ -121,6 +143,75 @@ export async function boot(canvas, consoleEl) {
     console.log(`[WebX] Image: ${(imgBytes.byteLength / 1024 / 1024).toFixed(0)} MiB`);
     rt.load_fs_image(imgBytes);
     console.log('[WebX] VFS populated from ext2 image.');
+
+    /* ── VFS overlay: /proc stubs + Vulkan ICD ── */
+    /*
+     * glibc reads /proc/cpuinfo at startup for CPU feature detection (SSE4,
+     * AVX, etc.). Wine reads /proc/self/exe for its own path. ntdll reads
+     * /proc/self/maps and /proc/self/status. These aren't in the ext2 image
+     * because /proc is a kernel pseudo-fs; we synthesise them here.
+     *
+     * The Vulkan ICD JSON is added as a fallback even though extract-rootfs.sh
+     * installs it into the image — this guarantees it's present regardless of
+     * image preparation state.
+     */
+    const enc = new TextEncoder();
+
+    rt.add_file('/proc/version',
+        enc.encode('Linux version 6.1.0-canary (gcc 12.3.0) #1 SMP PREEMPT\n'));
+
+    rt.add_file('/proc/self/exe',
+        enc.encode(LAUNCH_BIN));
+
+    rt.add_file('/proc/self/cmdline',
+        enc.encode([LAUNCH_BIN, ...LAUNCH_ARGS].join('\0') + '\0'));
+
+    rt.add_file('/proc/self/comm',
+        enc.encode(LAUNCH_BIN.split('/').pop() + '\n'));
+
+    /* Minimal /proc/self/stat — Wine/ntdll reads fields 1-4 (pid, comm, state, ppid). */
+    rt.add_file('/proc/self/stat',
+        enc.encode('1 (bash) R 0 1 1 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 ' +
+                   '18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0\n'));
+
+    rt.add_file('/proc/self/status',
+        enc.encode(
+            'Name:\tbash\n'   +
+            'State:\tR (running)\n' +
+            'Pid:\t1\nPPid:\t0\n'  +
+            'Uid:\t1000\t1000\t1000\t1000\n' +
+            'Gid:\t1000\t1000\t1000\t1000\n' +
+            'VmRSS:\t65536 kB\nVmPeak:\t65536 kB\n'));
+
+    /* Empty maps — ntdll tolerates EOF here. */
+    rt.add_file('/proc/self/maps', enc.encode(''));
+
+    /*
+     * /proc/cpuinfo — glibc probes this for CPUID feature flags at startup.
+     * Include the flags that DXVK, VKD3D, and Wine check: SSE4.1/4.2, AVX,
+     * AVX2, CX16 (cmpxchg16b for 64-bit atomics), POPCNT, AES, FMA.
+     */
+    rt.add_file('/proc/cpuinfo', enc.encode(
+        'processor\t: 0\n'                        +
+        'vendor_id\t: GenuineIntel\n'              +
+        'cpu family\t: 6\n'                        +
+        'model\t\t: 142\n'                         +
+        'model name\t: Intel(R) Core(TM) i7 (Canary Emulated)\n' +
+        'cpu MHz\t\t: 2400.000\n'                  +
+        'cache size\t: 8192 KB\n'                  +
+        'flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat ' +
+        'pse36 clflush mmx fxsr sse sse2 ht syscall nx rdtscp lm constant_tsc '         +
+        'pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave '      +
+        'avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch avx2 bmi1 bmi2\n'));
+
+    /* Vulkan ICD manifest — points loader to our WebX ICD inside the image. */
+    rt.add_file('/etc/vulkan/icd.d/vkwebx_icd.json',
+        enc.encode(JSON.stringify({
+            file_format_version: '1.0.0',
+            ICD: { library_path: '/usr/local/lib/libvkwebx.so', api_version: '1.3.0' },
+        })));
+
+    console.log('[WebX] /proc stubs and Vulkan ICD JSON written to VFS.');
 
     /* ── Console output (drain stdout/stderr each frame) ── */
     const dec = new TextDecoder();
@@ -280,12 +371,13 @@ export async function boot(canvas, consoleEl) {
                 }
             };
             worker.postMessage({
-                type:        'init',
-                wasmModule:  _wasmModule,   /* null if caching failed — Worker loads independently */
+                type:         'init',
+                wasmModule:   _wasmModule,  /* null if caching failed — Worker loads independently */
+                sharedMemory: _wasmMemory,  /* non-null only with pkg-threads WASM build */
                 tid,
-                childStack:  child_stack,
+                childStack:   child_stack,
                 tls,
-                childTidptr: child_tidptr,
+                childTidptr:  child_tidptr,
             });
         });
 
@@ -370,23 +462,35 @@ export async function boot(canvas, consoleEl) {
         throw new Error('Canary: prepare_elf() failed — check console for details.');
 
     /* ── Step loop (requestAnimationFrame-driven) ── */
+    /*
+     * Run guest instructions for FRAME_BUDGET_MS per animation frame.
+     * drainIoPorts() is called both intra-frame (every 1024 steps) and
+     * at the end of each frame.  The intra-frame drain ensures that as
+     * soon as the guest has written a complete Vulkan command packet,
+     * VkBridge can parse and begin dispatching it — reducing the round-
+     * trip latency from a full frame to a single async microtask tick.
+     */
     function stepLoop() {
         const deadline = performance.now() + FRAME_BUDGET_MS;
+        let alive = true;
+        let steps = 0;
+
         while (performance.now() < deadline) {
-            if (!rt.step()) {
-                drainOutput();
-                drainIoPorts();
-                drainCloneRequests();
-                renderFramebuffer();
-                console.log('[WebX] Guest process exited.');
-                return;
-            }
+            if (!rt.step()) { alive = false; break; }
+            /* Drain IO every 1024 steps so VkBridge sees bytes promptly. */
+            if ((++steps & 1023) === 0) drainIoPorts();
         }
+
         drainOutput();
         drainIoPorts();
         drainCloneRequests();
         renderFramebuffer();
-        requestAnimationFrame(stepLoop);
+
+        if (alive) {
+            requestAnimationFrame(stepLoop);
+        } else {
+            console.log('[WebX] Guest process exited.');
+        }
     }
 
     requestAnimationFrame(stepLoop);

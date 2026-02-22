@@ -10,6 +10,7 @@
  *
  * Message protocol (main → worker):
  *   { type: 'init', wasmModule: WebAssembly.Module|null,
+ *     sharedMemory: WebAssembly.Memory|null,  — non-null with pkg-threads build only
  *     tid: number, childStack: number, tls: number, childTidptr: number }
  *   { type: 'run' }
  *   { type: 'stop' }
@@ -38,8 +39,15 @@ self.onmessage = async (event) => {
             try {
                 const wasmJs = await import(CANARY_WASM_URL);
 
-                if (msg.wasmModule) {
-                    /* Reuse the pre-compiled WebAssembly.Module from the main thread. */
+                if (msg.wasmModule && msg.sharedMemory) {
+                    /*
+                     * pkg-threads build: initialise with the pre-compiled module
+                     * AND the SharedArrayBuffer-backed memory from the main thread.
+                     * Both Workers see the same guest address space (CLONE_VM).
+                     */
+                    await wasmJs.default(msg.wasmModule, msg.sharedMemory);
+                } else if (msg.wasmModule) {
+                    /* Standard build: reuse compiled module, isolated memory. */
                     await wasmJs.default(msg.wasmModule);
                 } else {
                     /* No cached module — compile independently (slower first start). */
