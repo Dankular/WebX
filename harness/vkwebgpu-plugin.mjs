@@ -802,12 +802,12 @@ export class VkWebGPUPlugin {
     // =========================================================================
 
     #createRenderPass(v, payload) {
-        // Custom serialization from pipeline.rs (webx IPC path, not yet sent):
-        // attachCount(u32) + per attachment: vkFormat(u32)+loadOp(u32)+storeOp(u32)+isDepth(u32)
-        const attachCount = v.getUint32(0, true);
+        // payload: handle(u64@0) + attachCount(u32@8) + per attachment: vkFormat(u32)+loadOp(u32)+storeOp(u32)+isDepth(u32)
+        const h           = v.getBigUint64(0, true);
+        const attachCount = v.getUint32(8, true);
         const attachments = [];
         for (let i = 0; i < attachCount; i++) {
-            const base   = 4 + i * 16;
+            const base   = 12 + i * 16;
             const vkFmt  = v.getUint32(base,      true);
             const loadOp = v.getUint32(base + 4,  true);
             const storeOp= v.getUint32(base + 8,  true);
@@ -819,22 +819,21 @@ export class VkWebGPUPlugin {
                 isDepth: isDepth !== 0,
             });
         }
-        const h = this.#nextHandle++;
         this.#renderPasses.set(h, { attachments });
-        return okHandle(h);
+        return ok();
     }
 
     #createFramebuffer(v, payload) {
-        // rpHandle(u64)+width(u32)+height(u32)+viewCount(u32)+views[](u64)
-        const rpHandle  = v.getBigUint64(0,  true);
-        const width     = v.getUint32(8,  true);
-        const height    = v.getUint32(12, true);
-        const viewCount = v.getUint32(16, true);
+        // payload: handle(u64@0) + rpHandle(u64@8) + width(u32@16) + height(u32@20) + viewCount(u32@24) + views[](u64@28)
+        const h         = v.getBigUint64(0,  true);
+        const rpHandle  = v.getBigUint64(8,  true);
+        const width     = v.getUint32(16, true);
+        const height    = v.getUint32(20, true);
+        const viewCount = v.getUint32(24, true);
         const views     = [];
-        for (let i = 0; i < viewCount; i++) views.push(v.getBigUint64(20 + i * 8, true));
-        const h = this.#nextHandle++;
+        for (let i = 0; i < viewCount; i++) views.push(v.getBigUint64(28 + i * 8, true));
         this.#framebuffers.set(h, { rpHandle, width, height, views });
-        return okHandle(h);
+        return ok();
     }
 
     // =========================================================================
