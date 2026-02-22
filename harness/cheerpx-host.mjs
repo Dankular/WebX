@@ -1,43 +1,25 @@
 /**
  * WebX CheerpX Host
  *
- * Boots the SteamOS image in CheerpX and bridges Vulkan commands from the
- * guest ICD to the VkWebGPU-ICD plugin running on the host.
+ * Boots an i386 Debian guest in CheerpX and bridges Vulkan commands from the
+ * guest ICD (libvkwebgpu.so) to the WebGPU device running on the host.
+ *
+ * ## CheerpX constraints (confirmed 1.2.7)
+ *   - Only 32-bit (i386) Linux ELF binaries are supported
+ *   - HttpBytesDevice: max ~2 GB per image (single image — no split needed at <1.5 GB)
+ *   - registerCallback: no 'ready' event; only 'error' and similar internal events
  *
  * ## IPC Mechanism (CheerpX 1.2.5+)
  *
  *   cx.registerPortListener(port, (hostPort: MessagePort) => void)
  *
- *   This is the CORRECT signature — the callback receives a MessagePort object,
- *   NOT (port, value, isWrite) as the name might imply.
+ *   Callback fires on the first guest IN/OUT to the registered port.
+ *   After that it's a persistent bidirectional byte stream:
  *
- *   The MessagePort is established the first time the guest executes any IN/OUT
- *   instruction on the registered port.  After that it's a persistent bidirectional
- *   byte stream:
- *
- *     Guest → Host:  each outb(byte, port) fires hostPort.onmessage.
- *                    event.data contains the value written to the port.
+ *     Guest → Host:  each outb(byte, port) fires hostPort.onmessage
  *     Host → Guest:  hostPort.postMessage({ data: Uint8Array }) queues bytes
- *                    that become readable by the guest via subsequent inb(port).
  *
  *   CheerpX returns 0xFFFFFFFF from inl(port) when no data is queued.
- *   The guest ICD polls inl() until it gets the expected response seq number.
- *
- * ## CheerpX API reference (confirmed 1.2.7, source: reverse-engineered cx.js)
- *
- *   Linux.create({ mounts, networkInterface })
- *   cx.setKmsCanvas(canvas, width, height)
- *   cx.setCustomConsole(writeFn, cols, rows)
- *   cx.registerCallback(eventName, cb)
- *   cx.registerPortListener(port, cb: (hostPort: MessagePort) => void)
- *   cx.run(path, args, { env, cwd, uid, gid })
- *
- * ## Undocumented API NOT available (confirmed absent):
- *   - customDevices (no chardev hook)
- *   - onRead / onWrite / onIoctl
- *   - Any direct IDBDevice host-side file read API
- *
- * Feature request: https://github.com/leaningtech/cheerpx-meta/issues
  */
 
 import { VkBridge }  from './vk-bridge.mjs';
@@ -46,9 +28,8 @@ import { loadPlugin } from './vkwebgpu-plugin.mjs';
 /* Use the latest confirmed-stable CheerpX release */
 const CX_CDN = 'https://cxrtnc.leaningtech.com/1.2.7/cx.esm.js';
 
-/* SteamOS ext2 images produced by steam/prepare-image.sh (served from repo root/steam/) */
+/* i386 Debian guest image (single image, < 2 GB — Wine + DXVK + VkWebGPU ICD) */
 const STEAMOS_ROOTFS_URL = '/steam/steamos-rootfs.ext2';
-const STEAMOS_PROTON_URL = '/steam/steamos-proton.ext2';
 
 /* x86 I/O port used as the guest↔host IPC channel */
 const WEBX_PORT = 0x7860;
@@ -77,26 +58,20 @@ export async function boot(canvas, consoleEl) {
     const CX = await import(/* @vite-ignore */ CX_CDN);
     const { Linux, HttpBytesDevice, IDBDevice, OverlayDevice } = CX;
 
-    /* ── Mount SteamOS images (read-only base + persistent overlay each) ── */
-    /* steamos-rootfs.ext2 → / */
+    /* ── Mount i386 guest image ── */
+    /* Single ext2 image: i386 Debian + Wine32 + DXVK + VkWebGPU ICD */
     const roRoot  = await HttpBytesDevice.create(STEAMOS_ROOTFS_URL);
     const rwRoot  = await IDBDevice.create('webx-root-rw');
     const rootDev = await OverlayDevice.create(roRoot, rwRoot);
 
-    /* steamos-proton.ext2 → /opt (GE-Proton10-32 + webx scripts) */
-    const roProton  = await HttpBytesDevice.create(STEAMOS_PROTON_URL);
-    const rwProton  = await IDBDevice.create('webx-proton-rw');
-    const protonDev = await OverlayDevice.create(roProton, rwProton);
-
     /* ── Boot Linux ── */
     const cx = await Linux.create({
         mounts: [
-            { type: 'ext2', path: '/',    dev: rootDev   },
-            { type: 'ext2', path: '/opt', dev: protonDev },
-            { type: 'devs', path: '/dev'                 },
-            { type: 'proc', path: '/proc'                },
+            { type: 'ext2', path: '/',    dev: rootDev },
+            { type: 'devs', path: '/dev'               },
+            { type: 'proc', path: '/proc'              },
         ],
-        networkInterface: { authKey: null },
+        networkInterface: { authKey: null },  /* community license — no Tailscale */
     });
 
     /* ── KMS canvas ── */
@@ -168,36 +143,28 @@ export async function boot(canvas, consoleEl) {
         console.error('[WebX] Vulkan bridge will not function.');
     }
 
-    /* ── CheerpX lifecycle events ── */
-    cx.registerCallback('ready', () => console.log('[WebX] CheerpX ready'));
-
-    /* ── Launch Proton + game ── */
+    /* ── Launch Wine + game ── */
     const env = [
         'HOME=/root',
         'USER=gamer',
         'DISPLAY=:0',
         'XDG_RUNTIME_DIR=/run/user/1000',
 
-        /* Route all Vulkan to VkWebGPU ICD (libvkwebgpu.so, installed by prepare-image.sh) */
+        /* Route all Vulkan to VkWebGPU ICD (libvkwebgpu.so, i386 build) */
         'VK_DRIVER_FILES=/etc/vulkan/icd.d/vkwebgpu_icd.json',
         'VK_ICD_FILENAMES=/etc/vulkan/icd.d/vkwebgpu_icd.json',
 
         /* WebX IPC port (read by guest ICD to call ioperm) */
         `WEBX_PORT=0x${WEBX_PORT.toString(16)}`,
 
-        /* DXVK / VKD3D diagnostics */
+        /* DXVK diagnostics */
         'DXVK_LOG_LEVEL=info',
         'DXVK_HUD=fps,devinfo,memory',
-        'VKD3D_DEBUG=err',
 
-        /* Proton — GE-Proton10-32 installed at /opt/GE-Proton10-32 by prepare-image.sh */
-        'PROTON_PATH=/usr/bin/proton',
-        'STEAM_COMPAT_DATA_PATH=/home/gamer/.proton',
-        'STEAM_COMPAT_CLIENT_INSTALL_PATH=/opt/GE-Proton10-32',
-        /* Disable esync/fsync: CheerpX eventfd/futex emulation is incomplete */
-        'PROTON_NO_ESYNC=1',
-        'PROTON_NO_FSYNC=1',
-        'PROTON_USE_WINED3D=0',
+        /* Wine settings — 32-bit prefix, disable Wine's own D3D (use DXVK) */
+        'WINEPREFIX=/home/gamer/.wine',
+        'WINEARCH=win32',
+        'WINEDEBUG=-all,+d3d,+vulkan',
     ];
 
     await cx.run('/bin/bash', ['/opt/webx/launch.sh'], { env });
