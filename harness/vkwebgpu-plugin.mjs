@@ -2,7 +2,7 @@
  * VkWebGPU-ICD Host Plugin
  *
  * Real WebGPU implementation that receives the Vulkan command stream from the
- * CheerpX guest via vk-bridge.mjs and replays it against the browser WebGPU API.
+ * Canary guest via vk-bridge.mjs and replays it against the browser WebGPU API.
  *
  * Interface contract:
  *   initialize(adapter, device, canvas) → Promise<void>

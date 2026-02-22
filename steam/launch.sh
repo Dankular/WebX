@@ -1,25 +1,22 @@
 #!/bin/bash
 # /opt/webx/launch.sh
-# Runs inside the CheerpX guest (i386 Debian bookworm).
-# Starts an X server, initialises Wine + DXVK, then launches the target game.
+# Runs inside the Canary guest (x86-64 SteamOS).
+# Starts an X server, initialises Proton/Wine + DXVK, then launches the game.
 #
-# CheerpX-specific workarounds applied here:
-#   1. Remove stale Xorg lock/socket (IDBDevice overlay persists them across sessions)
-#   2. Pre-create /tmp/.X11-unix — Xorg can't create it (no setuid-root in CheerpX)
-#   3. LIBGL_ALWAYS_SOFTWARE=1 — no Mesa DRI driver for "CheerpX KMS" device
-#   4. AccelMethod none in xorg.conf — modesetting driver, CPU 2D, no glamor/DRI
-#   5. AutoAddDevices false — udev is not running inside CheerpX
+# Canary-specific notes:
+#   1. Remove stale Xorg lock/socket from previous sessions
+#   2. Pre-create /tmp/.X11-unix — Xorg needs it to exist
+#   3. Use the fbdev driver against /dev/fb0 (Canary's virtual framebuffer)
+#   4. AutoAddDevices false — udev is not running inside Canary
 
 set -e
 
 GAME="${WEBX_GAME_EXE:-/games/game.exe}"
 export WINEPREFIX="${WINEPREFIX:-/home/gamer/.wine}"
-export WINEARCH=win32
-export WINEDEBUG=-all,+d3d,+vulkan
+export WINEARCH="${WINEARCH:-win64}"
+export WINEDEBUG="${WINEDEBUG:--all,+d3d,+vulkan}"
 
 # ── 1. Clean up any stale Xorg state from a previous session ─────────────────
-# The IDBDevice read-write overlay persists /tmp across CheerpX restarts.
-# Without cleanup, Xorg refuses to start ("Server is already active for display 0").
 rm -f  /tmp/.X0-lock         2>/dev/null || true
 rm -f  /tmp/.X11-unix/X0     2>/dev/null || true
 rm -rf /tmp/.X11-unix         2>/dev/null || true
@@ -28,13 +25,7 @@ rm -rf /tmp/.X11-unix         2>/dev/null || true
 mkdir -p  /tmp/.X11-unix
 chmod 1777 /tmp/.X11-unix
 
-# ── 3. Force Mesa software rendering ─────────────────────────────────────────
-# CheerpX exposes a virtual "CheerpX KMS" DRM device. Mesa looks for a DRI
-# driver named "CheerpX KMS_dri.so" which doesn't exist. Force software path.
-export LIBGL_ALWAYS_SOFTWARE=1
-export GALLIUM_DRIVER=softpipe
-
-# ── 4+5. Minimal Xorg config ─────────────────────────────────────────────────
+# ── 3. Xorg config — fbdev driver against Canary's /dev/fb0 ──────────────────
 cat > /tmp/xorg.conf <<'XORGEOF'
 Section "ServerFlags"
     Option "AutoAddDevices"    "false"
@@ -43,13 +34,14 @@ EndSection
 
 Section "Device"
     Identifier "Device0"
-    Driver     "modesetting"
-    Option     "AccelMethod" "none"
+    Driver     "fbdev"
+    Option     "fbdev" "/dev/fb0"
 EndSection
 
 Section "Screen"
     Identifier "Screen0"
     Device     "Device0"
+    DefaultDepth 24
 EndSection
 
 Section "ServerLayout"
@@ -80,19 +72,27 @@ echo "[webx] Vulkan ICD: $VK_DRIVER_FILES"
 
 # ── Wine prefix initialisation (first run only) ───────────────────────────────
 if [ ! -f "$WINEPREFIX/.webx_initialized" ]; then
-    echo "[webx] Initializing Wine prefix (first run)..."
+    echo "[webx] Initializing Wine prefix (first run, WINEARCH=$WINEARCH)..."
     wine wineboot --init >/tmp/wineboot.log 2>&1 || true
     sleep 2
 
-    echo "[webx] Installing DXVK x32 DLLs..."
+    echo "[webx] Installing DXVK DLLs..."
     DXVK_DIR=/usr/share/dxvk
-    SYS32="$WINEPREFIX/drive_c/windows/system32"
-    mkdir -p "$SYS32"
+    # x86-64 prefix: system32 holds 64-bit DLLs, syswow64 holds 32-bit
+    SYS64="$WINEPREFIX/drive_c/windows/system32"
+    SYS32="$WINEPREFIX/drive_c/windows/syswow64"
+    mkdir -p "$SYS64" "$SYS32"
+
     for dll in d3d9 d3d10 d3d10_1 d3d10core d3d11 dxgi; do
-        if [ -f "$DXVK_DIR/${dll}.dll" ]; then
-            cp "$DXVK_DIR/${dll}.dll" "$SYS32/${dll}.dll"
+        # 64-bit
+        if [ -f "$DXVK_DIR/x64/${dll}.dll" ]; then
+            cp "$DXVK_DIR/x64/${dll}.dll" "$SYS64/${dll}.dll"
             wine reg add "HKCU\\Software\\Wine\\DllOverrides" \
                 /v "$dll" /d "native" /f 2>/dev/null || true
+        fi
+        # 32-bit (for 32-bit game components)
+        if [ -f "$DXVK_DIR/x32/${dll}.dll" ]; then
+            cp "$DXVK_DIR/x32/${dll}.dll" "$SYS32/${dll}.dll"
         fi
     done
 

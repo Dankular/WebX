@@ -7,7 +7,7 @@
 #   bash extract-rootfs.sh <path-to.img> <output-dir>
 #
 # Output:
-#   <output-dir>/steamos-rootfs.img   (ext4 image for CheerpX)
+#   <output-dir>/steamos-webx.ext2   (ext2 image for Canary)
 
 set -euo pipefail
 IMG="$1"
@@ -90,9 +90,8 @@ sudo umount /tmp/webx-rootfs
 LOOP=""
 
 # ── 6. Convert ext4 → ext2 ───────────────────────────────────────────
-# CheerpX's HttpBytesDevice accepts ext2 images.
-# ext4 images work too in many CheerpX versions but ext2 is safest.
-echo "[webx] Converting to ext2 for CheerpX compatibility..."
+# Canary's VFS parser accepts ext2 images.
+echo "[webx] Converting to ext2 for Canary compatibility..."
 FINAL="$OUT/steamos-webx.ext2"
 cp "$ROOTFS_IMG" "$FINAL"
 # Tune down ext4 features to ext2-compatible subset
@@ -104,8 +103,5 @@ echo "[webx] ── Done ──────────────────�
 echo "  Image: $FINAL"
 echo "  Size:  $(($(stat -c%s "$FINAL") / 1024 / 1024)) MB"
 echo ""
-echo "  Serve at /images/steamos-webx.ext2 (needs COOP/COEP headers)."
-echo "  Update STEAMOS_IMAGE_URL in harness/cheerpx-host.mjs."
-echo ""
-echo "  For CheerpX on-demand block fetch, generate an index:"
-echo "    cheerpx-create-index $FINAL"
+echo "  Serve at /steam/steamos-webx.ext2 (needs COOP/COEP headers)."
+echo "  Update STEAMOS_IMAGE_URL in harness/canary-host.mjs if you move it."

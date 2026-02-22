@@ -1,29 +1,25 @@
 /**
  * WebX Host VK Bridge
  *
- * Receives the binary Vulkan command stream from the CheerpX guest via the
- * x86 I/O port MessagePort channel.  Deserializes each packet and dispatches
- * to the active VkWebGPU-ICD plugin.
+ * Receives the binary Vulkan command stream from the Canary guest via the
+ * TCP socket bridge.  Deserializes each packet and dispatches to the active
+ * VkWebGPU-ICD plugin.
  *
- * ## Transport (CheerpX 1.2.5+)
+ * ## Transport (Canary TCP socket IPC)
  *
- *   cx.registerPortListener(0x7860, (hostPort: MessagePort) => { ... })
+ *   Guest ICD connects to 127.0.0.1:0x7860 (TCP).
+ *   Canary intercepts the connect() and routes it through drain_connect_requests().
+ *   JS intercepts the fd and wires it to this bridge in-process (no real socket).
  *
- *   Guest → Host: repeated outb(byte, 0x7860) — each generates onmessage on hostPort.
- *   Host → Guest: hostPort.postMessage({data: responseBytes}) — bytes readable
- *                 by the guest via subsequent inb(0x7860) calls.
+ *   Guest → Host: write(fd, packet, len)  → drain_socket_sends()  → handleWrite()
+ *   Host → Guest: onResponseReady(resp)   → rt.socket_recv_data(fd, resp)
  *
- * ## Usage (cheerpx-host.mjs)
+ * ## Usage (canary-host.mjs)
  *
  *   const bridge = new VkBridge(plugin);
- *   cx.registerPortListener(0x7860, (hostPort) => {
- *       bridge.onResponseReady = (resp) => hostPort.postMessage({ data: resp });
- *       hostPort.onmessage = (ev) => {
- *           const byte = typeof ev.data === 'number' ? ev.data & 0xFF
- *                      : Number(ev.data?.value ?? ev.data?.data?.[0] ?? 0) & 0xFF;
- *           bridge.handleWrite(new Uint8Array([byte]));
- *       };
- *   });
+ *   bridge.onResponseReady = (resp) => rt.socket_recv_data(vkFd, resp);
+ *   // In pollNetwork():
+ *   bridge.handleWrite(b64ToBytes(send.data));
  */
 
 const WEBX_MAGIC       = 0x58574756; /* "VGWX" in little-endian */

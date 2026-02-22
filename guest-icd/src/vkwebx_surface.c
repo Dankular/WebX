@@ -1,6 +1,6 @@
 /*
  * WebX Guest ICD — Surface and swapchain entrypoints
- * Wine uses VK_KHR_xcb_surface (X11) when running under Xorg inside CheerpX.
+ * Wine uses VK_KHR_xcb_surface (X11) when running under Xorg inside Canary.
  */
 
 #define VK_NO_PROTOTYPES

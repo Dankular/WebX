@@ -5,13 +5,18 @@
  *   Cross-Origin-Opener-Policy: same-origin
  *   Cross-Origin-Embedder-Policy: require-corp
  *
- * Also supports HTTP Range requests (RFC 7233) so CheerpX HttpBytesDevice
- * can fetch the 12 GB SteamOS ext2 image on demand, block by block.
+ * Also supports HTTP Range requests (RFC 7233) for on-demand block fetching
+ * of the SteamOS ext2 image.
  *
  * URL routing:
  *   /               → harness/index.html
  *   /steam/*        → ../steam/*    (large disk images, served with range support)
+ *   /canary/*       → CANARY_PKG/*  (Canary WASM package — canary_wasm.js + .wasm)
  *   /*              → harness/*     (JS modules, HTML, etc.)
+ *
+ * Set CANARY_PKG env var to override the default Canary package path.
+ * Default assumes Canary repo is a sibling of the SteamWeb directory:
+ *   D:\Dev Proj\Canary\crates\canary-wasm\pkg
  *
  * Usage: node server.mjs
  */
@@ -22,9 +27,15 @@ import { stat }                           from 'node:fs/promises';
 import { extname, join, resolve, dirname, sep } from 'node:path';
 import { fileURLToPath }                  from 'node:url';
 
-const HARNESS  = dirname(fileURLToPath(import.meta.url));
+const HARNESS   = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(join(HARNESS, '..'));
-const PORT     = 3000;
+const PORT      = 3000;
+
+/* Path to the Canary wasm-pack output directory.
+ * Default: sibling repo at ../../Canary/crates/canary-wasm/pkg relative to WebX root.
+ * Override with CANARY_PKG environment variable. */
+const CANARY_PKG = process.env.CANARY_PKG
+    ?? resolve(REPO_ROOT, '..', '..', 'Canary', 'crates', 'canary-wasm', 'pkg');
 
 const MIME = {
     '.html': 'text/html',
@@ -46,6 +57,7 @@ const CORS = {
 const ALLOWED_ROOTS = [
     resolve(HARNESS),
     resolve(join(REPO_ROOT, 'steam')),
+    resolve(CANARY_PKG),
 ];
 
 function isAllowed(realPath) {
@@ -61,8 +73,11 @@ createServer(async (req, res) => {
     if (path === '/') {
         file = join(HARNESS, 'index.html');
     } else if (path.startsWith('/steam/')) {
-        /* Disk images live one directory up, in steam/ */
+        /* Disk images live in steam/ */
         file = join(REPO_ROOT, path);
+    } else if (path.startsWith('/canary/')) {
+        /* Canary WASM package: canary_wasm.js + canary_wasm_bg.wasm */
+        file = join(CANARY_PKG, path.slice('/canary/'.length));
     } else {
         file = join(HARNESS, path);
     }
@@ -85,9 +100,8 @@ createServer(async (req, res) => {
 
     if (rangeHeader) {
         /* ── Range request (RFC 7233) ─────────────────────────────────────
-         * CheerpX HttpBytesDevice fetches blocks on demand using Range: bytes=start-end.
-         * We must respond 206 Partial Content, not 200, or CheerpX will reject it.
-         * HttpBytesDevice also requires Last-Modified or ETag to validate the image.
+         * Canary fetches ext2 image blocks on demand using Range: bytes=start-end.
+         * Must respond 206 Partial Content (not 200), with Last-Modified for validation.
          */
         const match = rangeHeader.match(/bytes=(\d*)-(\d*)/);
         if (!match) { res.writeHead(400); res.end('Bad Range'); return; }
@@ -127,7 +141,8 @@ createServer(async (req, res) => {
     }
 
 }).listen(PORT, () => {
-    console.log(`WebX dev server: http://localhost:${PORT}`);
+    console.log(`WebX dev server:  http://localhost:${PORT}`);
     console.log('COOP/COEP headers: active (WebGPU + SharedArrayBuffer enabled)');
-    console.log(`Guest image:       ${join(REPO_ROOT, 'steam', 'steamos-rootfs.ext2')}`);
+    console.log(`Guest image:      ${join(REPO_ROOT, 'steam', 'steamos-webx.ext2')}`);
+    console.log(`Canary WASM pkg:  ${CANARY_PKG}`);
 });

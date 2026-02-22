@@ -1,7 +1,7 @@
 /*
  * WebX Guest Vulkan ICD
  *
- * Installed inside the SteamOS/CheerpX guest as a Vulkan ICD.
+ * Installed inside the SteamOS/Canary guest as a Vulkan ICD.
  * DXVK and VKD3D-Proton call into this ICD, which serializes every
  * Vulkan call and sends it to the host JS bridge.
  *
@@ -29,12 +29,15 @@
 #include <sys/io.h>
 #endif
 
-/* ── IPC: x86 I/O port MessagePort channel (CheerpX 1.2.5+) ─────────── */
+/* ── IPC: x86 I/O port MessagePort channel ───────────────────────────── */
 /*
- * CheerpX.registerPortListener(port, (hostPort: MessagePort) => void)
+ * Canary emulates x86 IN/OUT instructions (opcodes 0xEC–0xEF) and exposes
+ * them to JS via registerPortListener — the same interface as CheerpX:
  *
- * The first IN or OUT instruction to the registered port triggers the callback
- * on the host, establishing a bidirectional MessageChannel:
+ *   rt.registerPortListener(port, (hostPort: MessagePort) => void)
+ *
+ * The first IN or OUT instruction to the registered port triggers the callback,
+ * establishing a bidirectional MessageChannel:
  *
  *   Guest → Host: outb(byte, WEBX_PORT)  →  hostPort.onmessage fires with byte
  *   Host → Guest: hostPort.postMessage({data: bytes})  →  inb(WEBX_PORT) reads
@@ -57,7 +60,7 @@ static void port_init(void) {
     g_port_ready = 1;
 #ifdef __x86_64__
     /* Request OS permission for 4 consecutive I/O ports starting at WEBX_PORT.
-     * Inside CheerpX this may be a no-op (emulated), but call it for correctness.
+     * Canary emulates I/O port access, but ioperm makes guest intent explicit.
      * Fall back to iopl(3) if ioperm fails (requires CAP_SYS_RAWIO). */
     if (ioperm(WEBX_PORT, 4, 1) != 0)
         iopl(3);
@@ -84,7 +87,7 @@ static void ipc_write_packet(const uint8_t *pkt, size_t total) {
  *
  * Protocol:
  *   Host does: hostPort.postMessage({ data: responseBytes })
- *   CheerpX queues those bytes in the port's receive FIFO.
+ *   Canary queues those bytes in the port's receive FIFO.
  *   inl() returns 0xFFFFFFFF when the FIFO is empty.
  *   The first 4 bytes of a response are the seq number (u32 LE, never 0xFFFFFFFF).
  *   Once inl() != 0xFFFFFFFF, we have the seq; then read result + len + payload.
