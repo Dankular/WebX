@@ -46,8 +46,8 @@ import { loadPlugin } from './vkwebgpu-plugin.mjs';
 /* Use the latest confirmed-stable CheerpX release */
 const CX_CDN = 'https://cxrtnc.leaningtech.com/1.2.7/cx.esm.js';
 
-/* SteamOS ext2 image produced by steam/extract-rootfs.sh */
-const STEAMOS_IMAGE_URL = '/images/steamos-webx.ext2';
+/* SteamOS ext2 image produced by steam/prepare-image.sh (served from repo root/steam/) */
+const STEAMOS_IMAGE_URL = '/steam/steamos-webx.ext2';
 
 /* x86 I/O port used as the guest↔host IPC channel */
 const WEBX_PORT = 0x7860;
@@ -170,9 +170,9 @@ export async function boot(canvas, consoleEl) {
         'DISPLAY=:0',
         'XDG_RUNTIME_DIR=/run/user/1000',
 
-        /* Route all Vulkan to the WebX guest ICD */
-        'VK_DRIVER_FILES=/etc/vulkan/icd.d/vkwebx_icd.json',
-        'VK_ICD_FILENAMES=/etc/vulkan/icd.d/vkwebx_icd.json',
+        /* Route all Vulkan to VkWebGPU ICD (libvkwebgpu.so, installed by prepare-image.sh) */
+        'VK_DRIVER_FILES=/etc/vulkan/icd.d/vkwebgpu_icd.json',
+        'VK_ICD_FILENAMES=/etc/vulkan/icd.d/vkwebgpu_icd.json',
 
         /* WebX IPC port (read by guest ICD to call ioperm) */
         `WEBX_PORT=0x${WEBX_PORT.toString(16)}`,
@@ -182,8 +182,11 @@ export async function boot(canvas, consoleEl) {
         'DXVK_HUD=fps,devinfo,memory',
         'VKD3D_DEBUG=err',
 
-        /* Proton flags */
+        /* Proton — GE-Proton10-32 installed at /opt/GE-Proton10-32 by prepare-image.sh */
+        'PROTON_PATH=/usr/bin/proton',
         'STEAM_COMPAT_DATA_PATH=/home/gamer/.proton',
+        'STEAM_COMPAT_CLIENT_INSTALL_PATH=/opt/GE-Proton10-32',
+        /* Disable esync/fsync: CheerpX eventfd/futex emulation is incomplete */
         'PROTON_NO_ESYNC=1',
         'PROTON_NO_FSYNC=1',
         'PROTON_USE_WINED3D=0',
