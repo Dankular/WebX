@@ -72,17 +72,22 @@ createServer(async (req, res) => {
         res.writeHead(403); res.end('Forbidden'); return;
     }
 
+    /* Silence browser favicon requests */
+    if (path === '/favicon.ico') { res.writeHead(204); res.end(); return; }
+
     let fileStat;
     try { fileStat = await stat(realFile); }
     catch { res.writeHead(404); res.end('Not found'); return; }
 
-    const contentType = MIME[extname(realFile)] ?? 'application/octet-stream';
-    const rangeHeader = req.headers['range'];
+    const contentType  = MIME[extname(realFile)] ?? 'application/octet-stream';
+    const lastModified = fileStat.mtime.toUTCString();  /* Required by HttpBytesDevice */
+    const rangeHeader  = req.headers['range'];
 
     if (rangeHeader) {
         /* ── Range request (RFC 7233) ─────────────────────────────────────
          * CheerpX HttpBytesDevice fetches blocks on demand using Range: bytes=start-end.
          * We must respond 206 Partial Content, not 200, or CheerpX will reject it.
+         * HttpBytesDevice also requires Last-Modified or ETag to validate the image.
          */
         const match = rangeHeader.match(/bytes=(\d*)-(\d*)/);
         if (!match) { res.writeHead(400); res.end('Bad Range'); return; }
@@ -103,6 +108,7 @@ createServer(async (req, res) => {
             'Content-Range':  `bytes ${start}-${end}/${fileSize}`,
             'Content-Length': String(end - start + 1),
             'Accept-Ranges':  'bytes',
+            'Last-Modified':  lastModified,
         });
         createReadStream(realFile, { start, end }).pipe(res);
 
@@ -115,6 +121,7 @@ createServer(async (req, res) => {
             'Content-Type':   contentType,
             'Content-Length': String(fileStat.size),
             'Accept-Ranges':  'bytes',
+            'Last-Modified':  lastModified,
         });
         createReadStream(realFile).pipe(res);
     }

@@ -46,8 +46,9 @@ import { loadPlugin } from './vkwebgpu-plugin.mjs';
 /* Use the latest confirmed-stable CheerpX release */
 const CX_CDN = 'https://cxrtnc.leaningtech.com/1.2.7/cx.esm.js';
 
-/* SteamOS ext2 image produced by steam/prepare-image.sh (served from repo root/steam/) */
-const STEAMOS_IMAGE_URL = '/steam/steamos-webx.ext2';
+/* SteamOS ext2 images produced by steam/prepare-image.sh (served from repo root/steam/) */
+const STEAMOS_ROOTFS_URL = '/steam/steamos-rootfs.ext2';
+const STEAMOS_PROTON_URL = '/steam/steamos-proton.ext2';
 
 /* x86 I/O port used as the guest↔host IPC channel */
 const WEBX_PORT = 0x7860;
@@ -76,17 +77,24 @@ export async function boot(canvas, consoleEl) {
     const CX = await import(/* @vite-ignore */ CX_CDN);
     const { Linux, HttpBytesDevice, IDBDevice, OverlayDevice } = CX;
 
-    /* ── Mount SteamOS image (read-only base + persistent overlay) ── */
-    const roDevice = await HttpBytesDevice.create(STEAMOS_IMAGE_URL);
-    const rwDevice = await IDBDevice.create('webx-steamos-rw');
-    const rootDev  = await OverlayDevice.create(roDevice, rwDevice);
+    /* ── Mount SteamOS images (read-only base + persistent overlay each) ── */
+    /* steamos-rootfs.ext2 → / */
+    const roRoot  = await HttpBytesDevice.create(STEAMOS_ROOTFS_URL);
+    const rwRoot  = await IDBDevice.create('webx-root-rw');
+    const rootDev = await OverlayDevice.create(roRoot, rwRoot);
+
+    /* steamos-proton.ext2 → /opt (GE-Proton10-32 + webx scripts) */
+    const roProton  = await HttpBytesDevice.create(STEAMOS_PROTON_URL);
+    const rwProton  = await IDBDevice.create('webx-proton-rw');
+    const protonDev = await OverlayDevice.create(roProton, rwProton);
 
     /* ── Boot Linux ── */
     const cx = await Linux.create({
         mounts: [
-            { type: 'ext2', path: '/',    dev: rootDev },
-            { type: 'devs', path: '/dev'               },
-            { type: 'proc', path: '/proc'              },
+            { type: 'ext2', path: '/',    dev: rootDev   },
+            { type: 'ext2', path: '/opt', dev: protonDev },
+            { type: 'devs', path: '/dev'                 },
+            { type: 'proc', path: '/proc'                },
         ],
         networkInterface: { authKey: null },
     });

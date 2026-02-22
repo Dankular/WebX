@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # prepare-image.sh
 #
-# Downloads a SteamOS container base image, installs Proton, and adds the
-# WebX guest ICD so the image is ready to be served to CheerpX.
+# Builds two ext2 images for CheerpX (each must be < 2 GB due to HttpBytesDevice limit):
 #
-# Requires: docker (or podman), e2tools, curl
-# Output: steamos-webx.ext2  (serve at /images/steamos-webx.ext2)
+#   steamos-rootfs.ext2  (~1.2 GB)  — Sniper base + Xorg + VkWebGPU ICD + boot scripts
+#   steamos-proton.ext2  (~1.8 GB)  — GE-Proton only, mounted at /opt inside CheerpX
 #
-# The produced image is ~4 GB before compression.  Use HttpBytesDevice
-# in CheerpX so only the blocks needed for boot are fetched on demand.
+# cheerpx-host.mjs mounts:
+#   /     ← steamos-rootfs.ext2
+#   /opt  ← steamos-proton.ext2
+#
+# Requires: docker, curl (in container)
+# Output:   steam/steamos-rootfs.ext2   steam/steamos-proton.ext2
 
 set -euo pipefail
 
@@ -16,17 +19,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 IMAGE_TAG="webx-steamos:latest"
-OUTPUT="$SCRIPT_DIR/steamos-webx.ext2"
+OUTPUT_ROOT="$SCRIPT_DIR/steamos-rootfs.ext2"
+OUTPUT_PROTON="$SCRIPT_DIR/steamos-proton.ext2"
 MOUNT_DIR="$(mktemp -d)"
 
-# ── Step 1: Build a SteamOS-compatible container ──────────────────────
-# We base on the Steam Runtime Sniper image (the same runtime Proton ships with)
-# to get all required base libraries.
+cleanup() { rm -rf "$MOUNT_DIR"; }
+trap cleanup EXIT
+
+# ── Step 1: Build Docker image ────────────────────────────────────────
 cat > "$SCRIPT_DIR/Dockerfile.steamos" <<'EOF'
 FROM registry.gitlab.steamos.cloud/steamrt/sniper/platform:latest
 
-# libvulkan1, curl, python3 are already in the Sniper base image.
-# i386 is already enabled. Install minimal X server only.
+# libvulkan1, curl, python3 already in Sniper base; i386 already enabled.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xserver-xorg-core \
     xserver-xorg-video-fbdev \
@@ -34,7 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xserver-xorg-input-libinput \
     && rm -rf /var/lib/apt/lists/*
 
-# Download GE-Proton (includes Wine, DXVK, VKD3D-Proton, FAudio)
+# Download GE-Proton into /opt (Wine + DXVK + VKD3D-Proton + FAudio)
 ARG PROTON_VER=GE-Proton10-32
 RUN mkdir -p /opt && curl -L \
     "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/${PROTON_VER}/${PROTON_VER}.tar.gz" \
@@ -45,11 +49,11 @@ RUN mkdir -p /opt && curl -L \
 COPY launch.sh /opt/webx/launch.sh
 RUN chmod +x /opt/webx/launch.sh
 
-# VkWebGPU ICD binary (Rust, built with webx feature — see steam/build-vkwebgpu.sh)
+# VkWebGPU ICD
 COPY libvkwebgpu.so /usr/lib/x86_64-linux-gnu/libvkwebgpu.so
 COPY vkwebgpu_icd.json /etc/vulkan/icd.d/vkwebgpu_icd.json
 
-# Remove other ICDs so the Vulkan loader only finds our ICD
+# Remove GPU vendor ICDs
 RUN rm -f /etc/vulkan/icd.d/intel*.json \
           /etc/vulkan/icd.d/radeon*.json \
           /etc/vulkan/icd.d/nvidia*.json \
@@ -60,56 +64,57 @@ RUN rm -f /etc/vulkan/icd.d/intel*.json \
 RUN useradd -m -u 1000 gamer
 EOF
 
-# ── Step 2: Build the Docker image ────────────────────────────────────
-echo "[webx] Building SteamOS container image..."
+echo "[webx] Building container image..."
 
-# Copy artifacts needed for the build.
-# vkwebgpu_icd.json is already in steam/ (created alongside this script).
-# libvkwebgpu.so must be built first: run `npm run build:vkwebgpu:linux`
 if [[ ! -f "$SCRIPT_DIR/libvkwebgpu.so" ]]; then
-    echo "[webx] WARNING: steam/libvkwebgpu.so not found."
-    echo "         Build it first with: npm run build:vkwebgpu:linux"
-    echo "         Creating placeholder stub so the image build doesn't fail."
-    # Minimal valid ELF stub; replace with the real binary before serving
+    echo "[webx] WARNING: steam/libvkwebgpu.so not found — using stub."
     printf '\x7fELF' > "$SCRIPT_DIR/libvkwebgpu.so"
 fi
 
-docker build \
-    -f "$SCRIPT_DIR/Dockerfile.steamos" \
-    -t "$IMAGE_TAG" \
-    "$SCRIPT_DIR"
+docker build -f "$SCRIPT_DIR/Dockerfile.steamos" -t "$IMAGE_TAG" "$SCRIPT_DIR"
 
-# ── Step 3: Export container filesystem to ext2 ───────────────────────
+# ── Step 2: Export container filesystem ───────────────────────────────
 echo "[webx] Exporting container filesystem..."
 CONTAINER_ID=$(docker create "$IMAGE_TAG")
 docker export "$CONTAINER_ID" | tar -C "$MOUNT_DIR" -x
 docker rm "$CONTAINER_ID"
 
-# ── Step 4: Create ext2 image ─────────────────────────────────────────
-echo "[webx] Creating ext2 image (this may take a few minutes)..."
-# Size: 12 GB — Sniper base + GE-Proton is ~6 GB uncompressed
-dd if=/dev/zero bs=1M count=12288 of="$OUTPUT" status=progress
-mkfs.ext2 -F -L "steamos-webx" "$OUTPUT"
+# ── Step 3: steamos-rootfs.ext2  (everything except /opt) ────────────
+# Data: ~918 MB → 1.3 GB ext2 gives comfortable headroom
+echo "[webx] Creating steamos-rootfs.ext2 (~1.3 GB)..."
+dd if=/dev/zero bs=1M count=1330 of="$OUTPUT_ROOT" status=progress
+mkfs.ext2 -F -L "steamos-root" "$OUTPUT_ROOT"
 
-# Copy filesystem into ext2
-# Requires e2tools package: apt install e2tools
-# Alternative: use a loop device mount if running as root
-if command -v e2cp &>/dev/null; then
-    tar -C "$MOUNT_DIR" -c . | e2import - "$OUTPUT"
-else
-    echo "[webx] e2tools not found — mounting ext2 via loop device (requires root)"
-    LOOP=$(sudo losetup -fP --show "$OUTPUT")
-    sudo mount "$LOOP" /mnt
-    sudo cp -a "$MOUNT_DIR/." /mnt/
-    sudo umount /mnt
-    sudo losetup -d "$LOOP"
-fi
+LOOP_ROOT=$(losetup -fP --show "$OUTPUT_ROOT")
+mount "$LOOP_ROOT" /mnt
+# Copy everything except /opt (Proton lives in the second image)
+cp -a "$MOUNT_DIR/." /mnt/ 2>/dev/null || true
+rm -rf /mnt/opt
+mkdir -p /mnt/opt   # empty mountpoint — CheerpX will overlay proton image here
+umount /mnt
+losetup -d "$LOOP_ROOT"
+echo "[webx] steamos-rootfs.ext2 done."
 
-rm -rf "$MOUNT_DIR"
-# Note: leave libvkwebgpu.so in steam/ — it is a build artifact, not a temp file.
+# ── Step 4: steamos-proton.ext2  (GE-Proton only, root = /opt contents) ──
+# CheerpX mounts this at /opt, so the image root = the /opt directory contents.
+# Data: ~1.4 GB → 1.8 GB ext2 (still under the 2 GB HttpBytesDevice limit)
+echo "[webx] Creating steamos-proton.ext2 (~1.8 GB)..."
+dd if=/dev/zero bs=1M count=1843 of="$OUTPUT_PROTON" status=progress
+mkfs.ext2 -F -L "steamos-proton" "$OUTPUT_PROTON"
+
+LOOP_PROTON=$(losetup -fP --show "$OUTPUT_PROTON")
+mount "$LOOP_PROTON" /mnt
+# /opt in the container holds webx/ and GE-Proton10-32/
+cp -a "$MOUNT_DIR/opt/." /mnt/ 2>/dev/null || true
+umount /mnt
+losetup -d "$LOOP_PROTON"
+echo "[webx] steamos-proton.ext2 done."
 
 echo ""
-echo "[webx] Done: $OUTPUT"
-echo "       Serve at /images/steamos-webx.ext2 with correct COOP/COEP headers."
-echo "       For CheerpX HttpBytesDevice, also generate a block index:"
-echo "         cheerpx-create-index $OUTPUT > steamos-webx.ext2.js"
+echo "[webx] ── Done ──────────────────────────────────────────────────"
+echo "  Root image:   $OUTPUT_ROOT  (~$(du -sh "$OUTPUT_ROOT" | cut -f1))"
+echo "  Proton image: $OUTPUT_PROTON  (~$(du -sh "$OUTPUT_PROTON" | cut -f1))"
+echo ""
+echo "  Both < 2 GB — compatible with CheerpX HttpBytesDevice limit."
+echo "  cheerpx-host.mjs mounts / from rootfs and /opt from proton."
+echo "  Serve both with COOP/COEP headers via: node harness/server.mjs"
