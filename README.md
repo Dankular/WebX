@@ -6,12 +6,16 @@ WebX orchestrates a stack of open-source compatibility layers and GPU translatio
 technology so that a DirectX game launched via Proton ends up rendering through the
 browser's WebGPU API.
 
+**Runtime dependency:** WebX requires [Canary](../../Canary) — a from-scratch x86-64 / AArch64
+Linux ELF emulator written in Rust and compiled to WebAssembly. Canary boots the SteamOS
+ext2 image, runs Proton inside it, and provides the I/O port bridge used by the Vulkan ICD.
+
 ## Architecture
 
 ```
 ┌──────────────────────────── Browser tab ─────────────────────────────────┐
 │                                                                            │
-│  ┌──────────────── Canary  (x86-64 Linux VM in WASM) ───────────────────┐ │
+│  ┌──────────────── Canary  (x86-64 / AArch64 Linux VM in WASM) ─────────┐ │
 │  │                                                                        │ │
 │  │   Steam Game  (.exe)                                                   │ │
 │  │     │  Win32 / DirectX 9–12 API calls                                 │ │
@@ -39,7 +43,7 @@ browser's WebGPU API.
 
 | Component | Repo / Source | Runs in | Role |
 |-----------|--------------|---------|------|
-| **Canary** | `D:\Dev Proj\Canary` (this workspace) | Browser (WASM) | x86-64 Linux VM; boots real SteamOS ext2 image; emulates IN/OUT port instructions |
+| **Canary** | [`D:\Dev Proj\Canary`](../../Canary) | Browser (WASM) | x86-64 **and AArch64** Linux ELF emulator (Rust → WASM); boots SteamOS ext2 image; ~80 Linux syscalls; BSD sockets → WebSocket; `/dev/fb0` framebuffer → Canvas; pthreads via Web Workers; IN/OUT port bridge for Vulkan ICD; basic-block JIT |
 | **SteamOS image** | Valve Steam Deck repair image | Canary VM | Full Proton runtime: Wine + DXVK + VKD3D-Proton + Steam Runtime Sniper |
 | **Proton** | [ValveSoftware/Proton](https://github.com/ValveSoftware/Proton) | Canary VM | Windows→Linux game compatibility (thousands of per-game fixes via Protonfixes) |
 | **DXVK** | [doitsujin/dxvk](https://github.com/doitsujin/dxvk) | Canary VM | Translates D3D9/10/11 → Vulkan; ships inside Proton |
@@ -231,7 +235,8 @@ Open `http://localhost:3000` and click **Launch**.
 | Browser harness (`harness/`) | ✅ Canary boot + IPC bridge |
 | VkWebGPU-ICD plugin stub | ✅ Full WebGPU translation layer |
 | SteamOS image preparation | ✅ Docker + WSL scripts |
-| Canary x86 IN/OUT port emulation | 🔄 In progress (Canary dev) |
+| Canary x86 IN/OUT port emulation | ✅ Complete (`canary-io` crate; `drain_io_writes` / `push_io_read` JS API) |
+| Canary ARM64 ELF support | ✅ Complete (A64 decoder + interpreter + syscall translation) |
 | VkWebGPU-ICD real integration | 🔄 In progress (VkWebGPU-ICD triangle test passing) |
 | QEMU test setup | 🔄 Pending `libvkwebgpu.so` Linux build |
 | WSL2 environment | ⚠️ Needs enabling (Windows Features → WSL + VMP → reboot) |
@@ -243,7 +248,7 @@ Open `http://localhost:3000` and click **Launch**.
 | Project | Purpose |
 |---------|---------|
 | [VkWebGPU-ICD](https://github.com/Dankular/VkWebGPU-ICD) | Rust Vulkan→WebGPU ICD; the GPU execution backend for this project |
-| [Canary](../../Canary) | x86-64 Linux VM in WASM; runs the SteamOS image in the browser |
+| [Canary](../../Canary) | x86-64 + AArch64 Linux ELF emulator in WASM; **required runtime** — boots the SteamOS image in the browser |
 | [Proton](https://github.com/ValveSoftware/Proton) | Valve's Wine+DXVK+VKD3D runtime; enables Windows games on Linux |
 | [DXVK](https://github.com/doitsujin/dxvk) | D3D9/10/11 → Vulkan translation layer (ships in Proton) |
 | [VKD3D-Proton](https://github.com/HansKristian-Work/vkd3d-proton) | D3D12 → Vulkan translation layer (ships in Proton) |
