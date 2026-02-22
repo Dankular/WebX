@@ -129,5 +129,5 @@ createServer(async (req, res) => {
 }).listen(PORT, () => {
     console.log(`WebX dev server: http://localhost:${PORT}`);
     console.log('COOP/COEP headers: active (WebGPU + SharedArrayBuffer enabled)');
-    console.log(`SteamOS image:     ${join(REPO_ROOT, 'steam', 'steamos-webx.ext2')}`);
+    console.log(`Guest image:       ${join(REPO_ROOT, 'steam', 'steamos-rootfs.ext2')}`);
 });

@@ -167,5 +167,5 @@ export async function boot(canvas, consoleEl) {
         'WINEDEBUG=-all,+d3d,+vulkan',
     ];
 
-    await cx.run('/bin/bash', ['/opt/webx/launch.sh'], { env });
+    await cx.run('/bin/bash', ['/opt/webx/launch.sh'], { env, uid: 0, gid: 0 });
 }
