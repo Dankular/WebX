@@ -10,6 +10,10 @@ build/
 node_modules/
 dist/
 
+# Generated files
+steam/Dockerfile.steamos
+steam/libvkwebgpu.so
+
 # OS
 .DS_Store
 Thumbs.db

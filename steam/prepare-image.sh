@@ -25,13 +25,21 @@ MOUNT_DIR="$(mktemp -d)"
 cat > "$SCRIPT_DIR/Dockerfile.steamos" <<'EOF'
 FROM registry.gitlab.steamos.cloud/steamrt/sniper/platform:latest
 
-RUN dpkg --add-architecture i386 && apt-get update && apt-get install -y \
-    proton \
-    libvulkan1 libvulkan1:i386 \
-    vulkan-icd-loader \
-    xorg \
-    mesa-utils \
+# libvulkan1, curl, python3 are already in the Sniper base image.
+# i386 is already enabled. Install minimal X server only.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xserver-xorg-core \
+    xserver-xorg-video-fbdev \
+    xserver-xorg-video-modesetting \
+    xserver-xorg-input-libinput \
     && rm -rf /var/lib/apt/lists/*
+
+# Download GE-Proton (includes Wine, DXVK, VKD3D-Proton, FAudio)
+ARG PROTON_VER=GE-Proton10-32
+RUN mkdir -p /opt && curl -L \
+    "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/${PROTON_VER}/${PROTON_VER}.tar.gz" \
+    | tar -C /opt -xz \
+    && ln -sf /opt/${PROTON_VER}/proton /usr/bin/proton
 
 # WebX boot script
 COPY launch.sh /opt/webx/launch.sh
@@ -47,9 +55,6 @@ RUN rm -f /etc/vulkan/icd.d/intel*.json \
           /etc/vulkan/icd.d/nvidia*.json \
           /etc/vulkan/icd.d/lvp*.json \
           /etc/vulkan/icd.d/vkwebx*.json
-
-# Create webgpu device node placeholder (CheerpX will register the real one)
-RUN mkdir -p /dev && mknod /dev/webgpu c 240 0 || true
 
 # Default user
 RUN useradd -m -u 1000 gamer
@@ -82,8 +87,8 @@ docker rm "$CONTAINER_ID"
 
 # ── Step 4: Create ext2 image ─────────────────────────────────────────
 echo "[webx] Creating ext2 image (this may take a few minutes)..."
-# Size: 8 GB — adjust if the image grows
-dd if=/dev/zero bs=1M count=8192 of="$OUTPUT" status=progress
+# Size: 12 GB — Sniper base + GE-Proton is ~6 GB uncompressed
+dd if=/dev/zero bs=1M count=12288 of="$OUTPUT" status=progress
 mkfs.ext2 -F -L "steamos-webx" "$OUTPUT"
 
 # Copy filesystem into ext2

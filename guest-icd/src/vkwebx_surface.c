@@ -200,21 +200,21 @@ VKAPI_ATTR void VKAPI_CALL
 webx_GetPhysicalDeviceProperties2(VkPhysicalDevice pd,
                                    VkPhysicalDeviceProperties2 *props) {
     /* Delegate to the base query; we don't have extended properties yet */
-    extern void webx_GetPhysicalDeviceProperties(VkPhysicalDevice, VkPhysicalDeviceProperties *);
+    extern __attribute__((visibility("hidden"))) void webx_GetPhysicalDeviceProperties(VkPhysicalDevice, VkPhysicalDeviceProperties *);
     webx_GetPhysicalDeviceProperties(pd, &props->properties);
 }
 
 VKAPI_ATTR void VKAPI_CALL
 webx_GetPhysicalDeviceFeatures2(VkPhysicalDevice pd,
                                  VkPhysicalDeviceFeatures2 *feats) {
-    extern void webx_GetPhysicalDeviceFeatures(VkPhysicalDevice, VkPhysicalDeviceFeatures *);
+    extern __attribute__((visibility("hidden"))) void webx_GetPhysicalDeviceFeatures(VkPhysicalDevice, VkPhysicalDeviceFeatures *);
     webx_GetPhysicalDeviceFeatures(pd, &feats->features);
 }
 
 VKAPI_ATTR void VKAPI_CALL
 webx_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice pd,
                                          VkPhysicalDeviceMemoryProperties2 *props) {
-    extern void webx_GetPhysicalDeviceMemoryProperties(VkPhysicalDevice,
+    extern __attribute__((visibility("hidden"))) void webx_GetPhysicalDeviceMemoryProperties(VkPhysicalDevice,
                                                         VkPhysicalDeviceMemoryProperties *);
     webx_GetPhysicalDeviceMemoryProperties(pd, &props->memoryProperties);
 }

@@ -12,6 +12,7 @@
  */
 
 #define VK_NO_PROTOTYPES
+#define VK_USE_PLATFORM_XCB_KHR
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_icd.h>
 
@@ -197,7 +198,10 @@ VkResult webx_call(VkWebXCmd cmd, const void *payload, uint32_t payload_len,
 
 /* ── ICD loader interface ─────────────────────────────────────────────── */
 
-VKAPI_ATTR VkResult VKAPI_CALL
+/* ICD entry points must be visible despite -fvisibility=hidden */
+#define WEBX_ICD_EXPORT __attribute__((visibility("default")))
+
+WEBX_ICD_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
 vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t *p_version) {
     if (*p_version > 6) *p_version = 6;
     return VK_SUCCESS;
@@ -207,12 +211,12 @@ vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t *p_version) {
 static PFN_vkVoidFunction webx_get_instance_proc(VkInstance, const char *);
 static PFN_vkVoidFunction webx_get_device_proc(VkDevice, const char *);
 
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+WEBX_ICD_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vk_icdGetInstanceProcAddr(VkInstance inst, const char *name) {
     return webx_get_instance_proc(inst, name);
 }
 
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+WEBX_ICD_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vk_icdGetPhysicalDeviceProcAddr(VkInstance inst, const char *name) {
     return webx_get_instance_proc(inst, name);
 }
@@ -262,7 +266,7 @@ webx_EnumeratePhysicalDevices(VkInstance inst, uint32_t *count, VkPhysicalDevice
     return VK_SUCCESS;
 }
 
-static VKAPI_ATTR void VKAPI_CALL
+VKAPI_ATTR void VKAPI_CALL
 webx_GetPhysicalDeviceProperties(VkPhysicalDevice pd, VkPhysicalDeviceProperties *props) {
     uint64_t h = (uint64_t)(uintptr_t)pd;
     uint8_t *data; uint32_t len;
@@ -273,7 +277,7 @@ webx_GetPhysicalDeviceProperties(VkPhysicalDevice pd, VkPhysicalDeviceProperties
     free(data);
 }
 
-static VKAPI_ATTR void VKAPI_CALL
+VKAPI_ATTR void VKAPI_CALL
 webx_GetPhysicalDeviceFeatures(VkPhysicalDevice pd, VkPhysicalDeviceFeatures *feats) {
     uint64_t h = (uint64_t)(uintptr_t)pd;
     uint8_t *data; uint32_t len;
@@ -300,7 +304,7 @@ webx_GetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice pd,
     *count = 1;
 }
 
-static VKAPI_ATTR void VKAPI_CALL
+VKAPI_ATTR void VKAPI_CALL
 webx_GetPhysicalDeviceMemoryProperties(VkPhysicalDevice pd,
                                         VkPhysicalDeviceMemoryProperties *props) {
     memset(props, 0, sizeof(*props));

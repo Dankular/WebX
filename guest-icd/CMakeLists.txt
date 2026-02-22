@@ -29,9 +29,12 @@ target_compile_options(vkwebx PRIVATE
 )
 
 # Export only the three ICD loader symbols
+# Use LINK_OPTIONS (not LINK_FLAGS) so CMake properly quotes paths with spaces.
 set_target_properties(vkwebx PROPERTIES
     C_VISIBILITY_PRESET hidden
-    LINK_FLAGS "-Wl,--version-script=${CMAKE_SOURCE_DIR}/vkwebx.map"
+)
+target_link_options(vkwebx PRIVATE
+    "LINKER:--version-script,${CMAKE_SOURCE_DIR}/vkwebx.map"
 )
 
 target_link_libraries(vkwebx PRIVATE pthread)
