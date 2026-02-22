@@ -5,13 +5,6 @@
  * and bridges Vulkan commands from the guest ICD (libvkwebx.so) to the
  * WebGPU device running on the host.
  *
- * ## Canary vs CheerpX
- *   - Full x86-64 ELF support (CheerpX was limited to 32-bit i386)
- *   - Self-hosted WASM — no CDN dependency, fully open source
- *   - Framebuffer at /dev/fb0 (1024×768 BGRA) → canvas blit via get_framebuffer()
- *   - pthreads via SharedArrayBuffer + Web Workers
- *   - x86 IN/OUT port instructions (0xEC–0xEF) emulated natively
- *
  * ## IPC Mechanism (x86 I/O port 0x7860, polled)
  *
  *   Canary's canary-io crate queues guest outb/inl accesses.  JS drains them
@@ -26,28 +19,55 @@
  * ## Execution model
  *
  *   prepare_elf() sets up the ELF binary in guest memory without running it.
- *   step() is then called in requestAnimationFrame batches, interleaved with
- *   I/O port draining and framebuffer blitting.
+ *   step() is called in requestAnimationFrame batches interleaved with I/O
+ *   port draining, network polling, thread spawning, and framebuffer blitting.
+ *
+ * ## Threading
+ *
+ *   Guest clone() calls are queued in drain_clone_requests(). Each entry
+ *   spawns a Web Worker (worker.mjs) which runs its own CanaryRuntime for
+ *   the child thread. Stdout/stderr/clone cascades are forwarded to main.
+ *
+ * ## Networking
+ *
+ *   Guest TCP connect() calls are queued in drain_connect_requests(). Each
+ *   entry opens a WebSocket to ws://localhost:3001/tcp/<ip>/<port>. A TCP
+ *   proxy (tcp-proxy.mjs or websockify) must run on port 3001.
  */
 
 import { VkBridge }  from './vk-bridge.mjs';
 import { loadPlugin } from './vkwebgpu-plugin.mjs';
 
 /* Canary WASM package — served from /canary/ by server.mjs */
-const CANARY_WASM_URL = '/canary/canary_wasm.js';
+const CANARY_WASM_URL    = '/canary/canary_wasm.js';
+const CANARY_WASM_BG_URL = '/canary/canary_wasm_bg.wasm';
 
 /* x86-64 SteamOS guest image (ext2, with libvkwebx.so pre-installed) */
 const STEAMOS_IMAGE_URL = '/steam/steamos-webx.ext2';
 
-/* x86 I/O port used as the guest↔host IPC doorbell (same as CheerpX design) */
+/* x86 I/O port used as the guest↔host IPC doorbell */
 const WEBX_PORT = 0x7860;
 
-/* Framebuffer resolution Canary exposes via /dev/fb0 */
-const FB_WIDTH  = 1280;
-const FB_HEIGHT = 720;
+/* Framebuffer resolution — must match Canary's canary-fb crate (FB_WIDTH/FB_HEIGHT) */
+const FB_WIDTH  = 1024;
+const FB_HEIGHT = 768;
 
 /* Execution budget per animation frame (ms). */
 const FRAME_BUDGET_MS = 10;
+
+/* TCP-over-WebSocket proxy URL for guest network connections. */
+const TCP_PROXY_BASE = 'ws://localhost:3001/tcp';
+
+/* ── Module-level state shared across workers ─────────────────────────────── */
+
+/* Compiled WebAssembly.Module cached for sharing with thread Workers. */
+let _wasmModule = null;
+
+/* Active thread Workers, keyed by guest TID. */
+const _workers = new Map();
+
+/* Active TCP WebSocket connections, keyed by guest socket fd. */
+const _wsMap = new Map();
 
 /* ── Boot ─────────────────────────────────────────────────────────────────── */
 
@@ -73,7 +93,21 @@ export async function boot(canvas, consoleEl) {
     /* ── Load Canary WASM ── */
     console.log('[WebX] Loading Canary WASM…');
     const wasmMod = await import(/* @vite-ignore */ CANARY_WASM_URL);
-    await wasmMod.default(); /* run wasm-bindgen __wbg_init() */
+    const wasmInitResult = await wasmMod.default();
+
+    /* Cache compiled module for sharing with thread Workers. */
+    _wasmModule = wasmInitResult?.module ?? null;
+    if (!_wasmModule) {
+        /* Fallback: compile the .wasm binary directly. */
+        try {
+            _wasmModule = await WebAssembly.compileStreaming(fetch(CANARY_WASM_BG_URL));
+            console.log('[WebX] WASM module compiled and cached for Workers.');
+        } catch (e) {
+            console.warn('[WebX] Could not cache WASM module for Workers:', e.message,
+                         '— thread Workers will load WASM independently.');
+        }
+    }
+
     const { CanaryRuntime } = wasmMod;
     const rt = new CanaryRuntime();
     console.log('[WebX] Canary runtime ready.');
@@ -123,34 +157,19 @@ export async function boot(canvas, consoleEl) {
 
     /* ── x86 I/O port bridge (0x7860) ── */
     /*
-     * Canary emulates x86 IN/OUT instructions via its IoCtx (canary-io crate).
-     * We use the polling API:
-     *
-     *   Guest → Host: outb(byte, 0x7860)
-     *                 → queued in IoCtx.pending_writes
-     *                 → drained by rt.drain_io_writes() each frame
-     *                 → fed to VkBridge.handleWrite()
-     *
-     *   Host → Guest: bridge.onResponseReady(resp)
-     *                 → rt.push_io_read(port, 4, seqU32)  ← unblocks inl()
-     *                 → rt.push_io_read(port, 1, byte) × N ← data via inb()
-     *
-     * Response layout (from guest protocol):
-     *   inl() returns the first 4 bytes (seq u32 LE, never 0xFFFFFFFF).
-     *   Remaining bytes are read via inb() one at a time: result(4) + len(4) + payload.
+     * Response layout (wire protocol):
+     *   inl() returns seq u32 LE (first 4 bytes, never 0xFFFFFFFF).
+     *   Remaining bytes: result i32 (4) + len u32 (4) + payload read via inb().
      */
     bridge.onResponseReady = (resp) => {
-        /* First 4 bytes of resp = seq u32 LE — returned by guest's inl() poll */
         const view = new DataView(resp.buffer, resp.byteOffset);
-        const seqU32 = view.getUint32(0, true);
-        rt.push_io_read(WEBX_PORT, 4, seqU32);
+        /* seq u32 — returned by guest's inl() poll, also first 4 bytes of response */
+        rt.push_io_read(WEBX_PORT, 4, view.getUint32(0, true));
         /* Remaining bytes delivered one at a time via inb() */
-        for (let i = 4; i < resp.length; i++) {
+        for (let i = 4; i < resp.length; i++)
             rt.push_io_read(WEBX_PORT, 1, resp[i]);
-        }
     };
 
-    /* Drain all pending guest outb() writes and feed bytes to the Vulkan bridge. */
     function drainIoPorts() {
         const raw = rt.drain_io_writes();
         if (raw === '[]') return;
@@ -163,6 +182,142 @@ export async function boot(canvas, consoleEl) {
             bridge.handleWrite(bytes);
         }
     }
+
+    /* ── Network bridge (TCP-over-WebSocket) ── */
+    /*
+     * Wine/wineserver and other guest processes open TCP sockets.
+     * Canary queues connect() calls; we forward them via WebSocket to a
+     * TCP proxy (node harness/tcp-proxy.mjs) listening on port 3001.
+     */
+    function runNetworkPoll() {
+        /* Open WebSocket connections for any pending connect() calls. */
+        let connectJson;
+        try { connectJson = rt.drain_connect_requests(); }
+        catch (_) { connectJson = '[]'; }
+
+        const connects = JSON.parse(connectJson);
+        for (const req of connects) {
+            if (_wsMap.has(req.fd)) continue;
+            try {
+                const url = `${TCP_PROXY_BASE}/${req.ip}/${req.port}`;
+                const ws  = new WebSocket(url);
+                ws.binaryType = 'arraybuffer';
+                ws.onopen    = () => rt.socket_connected(BigInt(req.fd));
+                ws.onmessage = (e) => rt.socket_recv_data(BigInt(req.fd), new Uint8Array(e.data));
+                ws.onclose   = () => _wsMap.delete(req.fd);
+                ws.onerror   = () => {}; /* connection refused — leave as Connecting */
+                _wsMap.set(req.fd, ws);
+            } catch (_) {}
+        }
+
+        /* Forward any pending outbound socket data. */
+        let sendJson;
+        try { sendJson = rt.drain_socket_sends(); }
+        catch (_) { sendJson = '[]'; }
+
+        const sends = JSON.parse(sendJson);
+        for (const req of sends) {
+            const ws = _wsMap.get(req.fd);
+            if (ws?.readyState === WebSocket.OPEN) {
+                try {
+                    const bin = atob(req.data);
+                    const buf = new Uint8Array(bin.length);
+                    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+                    ws.send(buf);
+                } catch (_) {}
+            }
+        }
+
+        requestAnimationFrame(runNetworkPoll);
+    }
+    requestAnimationFrame(runNetworkPoll);
+
+    /* ── Thread spawning ── */
+    /*
+     * When the guest calls clone(), Canary queues a CloneInfo record.
+     * We drain these each frame and spawn a Web Worker per entry.
+     * Each Worker runs its own CanaryRuntime for the child thread.
+     */
+    function drainCloneRequests() {
+        let cloneJson;
+        try { cloneJson = rt.drain_clone_requests(); }
+        catch (_) { return; }
+        if (cloneJson === '[]') return;
+        for (const req of JSON.parse(cloneJson))
+            spawnWorkerThread(req).catch(e => console.error('[WebX] Worker spawn failed:', e));
+    }
+
+    async function spawnWorkerThread(req) {
+        const { tid, child_stack, tls, child_tidptr } = req;
+        console.log(`[WebX] Spawning thread Worker tid=${tid}`);
+
+        const worker = new Worker(new URL('./worker.mjs', import.meta.url), { type: 'module' });
+        _workers.set(tid, worker);
+
+        worker.onmessage = (e) => {
+            const msg = e.data;
+            if (msg.type === 'stdout' || msg.type === 'stderr') {
+                if (consoleEl) consoleEl.textContent += dec.decode(msg.data);
+            } else if (msg.type === 'clone') {
+                /* Cascade: child thread itself called clone() */
+                for (const r of JSON.parse(msg.requests))
+                    spawnWorkerThread(r).catch(console.error);
+            } else if (msg.type === 'exit') {
+                console.log(`[WebX] Thread tid=${tid} exited (code=${msg.code})`);
+                _workers.delete(tid);
+            }
+        };
+
+        /* Send init params, then signal run once Worker confirms ready. */
+        await new Promise((resolve) => {
+            const origHandler = worker.onmessage;
+            worker.onmessage = (e) => {
+                if (e.data?.type === 'ready') {
+                    worker.onmessage = origHandler;
+                    resolve();
+                } else {
+                    origHandler(e);
+                }
+            };
+            worker.postMessage({
+                type:        'init',
+                wasmModule:  _wasmModule,   /* null if caching failed — Worker loads independently */
+                tid,
+                childStack:  child_stack,
+                tls,
+                childTidptr: child_tidptr,
+            });
+        });
+
+        worker.postMessage({ type: 'run' });
+    }
+
+    /* ── Input event forwarding ── */
+    /*
+     * Keyboard and mouse events are forwarded to the guest via Canary's
+     * evdev emulation layer (/dev/input/event0).
+     * Canvas must be focusable (tabindex) to receive keyboard events.
+     */
+    canvas.setAttribute('tabindex', '0');
+
+    canvas.addEventListener('keydown', (e) => {
+        e.preventDefault();
+        rt.push_key_event(e.code, true);
+    });
+    canvas.addEventListener('keyup', (e) => {
+        e.preventDefault();
+        rt.push_key_event(e.code, false);
+    });
+    canvas.addEventListener('mousemove', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = Math.round((e.clientX - rect.left) * (FB_WIDTH  / rect.width));
+        const y = Math.round((e.clientY - rect.top)  * (FB_HEIGHT / rect.height));
+        rt.push_mouse_move(x, y);
+    });
+    canvas.addEventListener('mousedown', (e) => rt.push_mouse_button(e.button, true));
+    canvas.addEventListener('mouseup',   (e) => rt.push_mouse_button(e.button, false));
+    /* Focus canvas on click so keyboard events are captured. */
+    canvas.addEventListener('click', () => canvas.focus());
 
     /* ── Environment and launch ── */
     const env = [
@@ -210,30 +365,18 @@ export async function boot(canvas, consoleEl) {
 
     console.log('[WebX] Starting guest: bash /opt/webx/launch.sh');
 
-    /* ── Step loop (requestAnimationFrame-driven) ──
-     *
-     * prepare_elf() loads the ELF, sets up memory/stack/CPU, and returns.
-     * step() then drives execution one instruction at a time.
-     *
-     * After each frame budget of steps:
-     *   1. Drain stdout/stderr for the console display.
-     *   2. Drain I/O port writes (outb packets) and feed to VkBridge.
-     *   3. Blit the framebuffer to canvas.
-     *
-     * drainIoPorts() may trigger bridge.onResponseReady() asynchronously
-     * (WebGPU dispatch is async). push_io_read() queues the response bytes
-     * so the guest's next inl()/inb() spin picks them up immediately.
-     */
     const elfReady = rt.prepare_elf(elfBytes, argvJson, envpJson);
     if (!elfReady)
         throw new Error('Canary: prepare_elf() failed — check console for details.');
 
+    /* ── Step loop (requestAnimationFrame-driven) ── */
     function stepLoop() {
         const deadline = performance.now() + FRAME_BUDGET_MS;
         while (performance.now() < deadline) {
             if (!rt.step()) {
                 drainOutput();
                 drainIoPorts();
+                drainCloneRequests();
                 renderFramebuffer();
                 console.log('[WebX] Guest process exited.');
                 return;
@@ -241,6 +384,7 @@ export async function boot(canvas, consoleEl) {
         }
         drainOutput();
         drainIoPorts();
+        drainCloneRequests();
         renderFramebuffer();
         requestAnimationFrame(stepLoop);
     }
