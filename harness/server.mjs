@@ -19,7 +19,7 @@
 import { createServer }                   from 'node:http';
 import { createReadStream }               from 'node:fs';
 import { stat }                           from 'node:fs/promises';
-import { extname, join, resolve, dirname } from 'node:path';
+import { extname, join, resolve, dirname, sep } from 'node:path';
 import { fileURLToPath }                  from 'node:url';
 
 const HARNESS  = dirname(fileURLToPath(import.meta.url));
@@ -49,7 +49,7 @@ const ALLOWED_ROOTS = [
 ];
 
 function isAllowed(realPath) {
-    return ALLOWED_ROOTS.some(r => realPath.startsWith(r + '/') || realPath === r);
+    return ALLOWED_ROOTS.some(r => realPath.startsWith(r + sep) || realPath === r);
 }
 
 createServer(async (req, res) => {
