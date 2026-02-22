@@ -12,19 +12,22 @@
  *   - pthreads via SharedArrayBuffer + Web Workers
  *   - x86 IN/OUT port instructions (0xEC–0xEF) emulated natively
  *
- * ## IPC Mechanism (x86 I/O port 0x7860)
+ * ## IPC Mechanism (x86 I/O port 0x7860, polled)
  *
- *   Canary emulates the guest outb/inl instructions and exposes them to JS
- *   via registerPortListener — the same interface as CheerpX.
+ *   Canary's canary-io crate queues guest outb/inl accesses.  JS drains them
+ *   each frame via rt.drain_io_writes() / rt.push_io_read().
  *
- *   Guest → Host: outb(byte, 0x7860)  → portListener callback fires
- *   Host → Guest: postMessage({data})  → inb(0x7860) returns queued bytes
+ *   Guest → Host: outb(byte, 0x7860)  → IoCtx.pending_writes
+ *                 → rt.drain_io_writes() → VkBridge.handleWrite()
+ *   Host → Guest: bridge.onResponseReady(resp)
+ *                 → rt.push_io_read(port, 4, seqU32)  ← unblocks guest inl()
+ *                 → rt.push_io_read(port, 1, byte) × N ← data for guest inb()
  *
  * ## Execution model
  *
- *   For long-running workloads (game loop) we drive Canary via rt.step() inside
- *   requestAnimationFrame batches so the JS event loop can service the port
- *   bridge and framebuffer blitter between steps.
+ *   prepare_elf() sets up the ELF binary in guest memory without running it.
+ *   step() is then called in requestAnimationFrame batches, interleaved with
+ *   I/O port draining and framebuffer blitting.
  */
 
 import { VkBridge }  from './vk-bridge.mjs';
@@ -120,47 +123,45 @@ export async function boot(canvas, consoleEl) {
 
     /* ── x86 I/O port bridge (0x7860) ── */
     /*
-     * Canary emulates x86 IN/OUT instructions and exposes them via
-     * registerPortListener — the same API as CheerpX 1.2.5+.
+     * Canary emulates x86 IN/OUT instructions via its IoCtx (canary-io crate).
+     * We use the polling API:
      *
-     * The callback receives a MessagePort when the guest first accesses
-     * the registered port, establishing a persistent bidirectional channel:
+     *   Guest → Host: outb(byte, 0x7860)
+     *                 → queued in IoCtx.pending_writes
+     *                 → drained by rt.drain_io_writes() each frame
+     *                 → fed to VkBridge.handleWrite()
      *
-     *   Guest → Host: outb(byte, 0x7860)  → hostPort.onmessage fires
-     *   Host → Guest: hostPort.postMessage({ data: Uint8Array })
-     *                 → guest reads via inb(0x7860) (one byte at a time)
+     *   Host → Guest: bridge.onResponseReady(resp)
+     *                 → rt.push_io_read(port, 4, seqU32)  ← unblocks inl()
+     *                 → rt.push_io_read(port, 1, byte) × N ← data via inb()
+     *
+     * Response layout (from guest protocol):
+     *   inl() returns the first 4 bytes (seq u32 LE, never 0xFFFFFFFF).
+     *   Remaining bytes are read via inb() one at a time: result(4) + len(4) + payload.
      */
-    if (typeof rt.registerPortListener === 'function') {
-        rt.registerPortListener(WEBX_PORT, (hostPort) => {
-            console.log('[WebX] IPC MessagePort established on port 0x' +
-                        WEBX_PORT.toString(16));
+    bridge.onResponseReady = (resp) => {
+        /* First 4 bytes of resp = seq u32 LE — returned by guest's inl() poll */
+        const view = new DataView(resp.buffer, resp.byteOffset);
+        const seqU32 = view.getUint32(0, true);
+        rt.push_io_read(WEBX_PORT, 4, seqU32);
+        /* Remaining bytes delivered one at a time via inb() */
+        for (let i = 4; i < resp.length; i++) {
+            rt.push_io_read(WEBX_PORT, 1, resp[i]);
+        }
+    };
 
-            bridge.onResponseReady = (resp) => {
-                hostPort.postMessage({ data: resp }, [resp.buffer]);
-            };
-
-            hostPort.onmessage = (event) => {
-                const raw = event.data;
-                let byte;
-                if (typeof raw === 'number') {
-                    byte = raw & 0xFF;
-                } else if (raw instanceof Uint8Array) {
-                    byte = raw[0] ?? 0;
-                } else if (raw?.value !== undefined) {
-                    byte = Number(raw.value) & 0xFF;
-                } else if (raw?.data instanceof Uint8Array) {
-                    byte = raw.data[0] ?? 0;
-                } else {
-                    byte = 0;
-                }
-                bridge.handleWrite(new Uint8Array([byte]));
-            };
-        });
-        console.log('[WebX] Port listener registered on 0x' + WEBX_PORT.toString(16));
-    } else {
-        console.warn('[WebX] rt.registerPortListener not available yet — ' +
-                     'x86 IN/OUT port emulation pending in Canary. ' +
-                     'Vulkan bridge will not function until implemented.');
+    /* Drain all pending guest outb() writes and feed bytes to the Vulkan bridge. */
+    function drainIoPorts() {
+        const raw = rt.drain_io_writes();
+        if (raw === '[]') return;
+        const writes = JSON.parse(raw);
+        for (const { port, size, val } of writes) {
+            if (port !== WEBX_PORT) continue;
+            /* Guest uses outb (size=1) byte-by-byte; handle wider writes defensively */
+            const bytes = new Uint8Array(size);
+            for (let i = 0; i < size; i++) bytes[i] = (val >>> (i * 8)) & 0xFF;
+            bridge.handleWrite(bytes);
+        }
     }
 
     /* ── Environment and launch ── */
@@ -211,26 +212,35 @@ export async function boot(canvas, consoleEl) {
 
     /* ── Step loop (requestAnimationFrame-driven) ──
      *
-     * run_elf() sets up the initial process state and begins execution.
-     * For long-running processes (game loops) we then drive execution
-     * via step() so the JS event loop can interleave I/O and rendering.
+     * prepare_elf() loads the ELF, sets up memory/stack/CPU, and returns.
+     * step() then drives execution one instruction at a time.
      *
-     * The FRAME_BUDGET_MS cap keeps the tab responsive while maximising
-     * throughput for the emulated guest.
+     * After each frame budget of steps:
+     *   1. Drain stdout/stderr for the console display.
+     *   2. Drain I/O port writes (outb packets) and feed to VkBridge.
+     *   3. Blit the framebuffer to canvas.
+     *
+     * drainIoPorts() may trigger bridge.onResponseReady() asynchronously
+     * (WebGPU dispatch is async). push_io_read() queues the response bytes
+     * so the guest's next inl()/inb() spin picks them up immediately.
      */
-    rt.run_elf(elfBytes, argvJson, envpJson);
+    const elfReady = rt.prepare_elf(elfBytes, argvJson, envpJson);
+    if (!elfReady)
+        throw new Error('Canary: prepare_elf() failed — check console for details.');
 
     function stepLoop() {
         const deadline = performance.now() + FRAME_BUDGET_MS;
         while (performance.now() < deadline) {
             if (!rt.step()) {
                 drainOutput();
+                drainIoPorts();
                 renderFramebuffer();
                 console.log('[WebX] Guest process exited.');
                 return;
             }
         }
         drainOutput();
+        drainIoPorts();
         renderFramebuffer();
         requestAnimationFrame(stepLoop);
     }

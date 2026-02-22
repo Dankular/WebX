@@ -1,25 +1,28 @@
 /**
  * WebX Host VK Bridge
  *
- * Receives the binary Vulkan command stream from the Canary guest via the
- * TCP socket bridge.  Deserializes each packet and dispatches to the active
- * VkWebGPU-ICD plugin.
+ * Accumulates the binary Vulkan command stream from the Canary guest,
+ * deserializes complete packets, and dispatches to the active VkWebGPU-ICD plugin.
  *
- * ## Transport (Canary TCP socket IPC)
+ * ## Transport (x86 I/O port 0x7860, polled via canary-io)
  *
- *   Guest ICD connects to 127.0.0.1:0x7860 (TCP).
- *   Canary intercepts the connect() and routes it through drain_connect_requests().
- *   JS intercepts the fd and wires it to this bridge in-process (no real socket).
+ *   Guest ICD streams command bytes via repeated outb(byte, 0x7860).
+ *   Canary's IoCtx queues each write; JS drains them via rt.drain_io_writes().
+ *   Bytes are fed here via handleWrite() one or more at a time.
  *
- *   Guest → Host: write(fd, packet, len)  → drain_socket_sends()  → handleWrite()
- *   Host → Guest: onResponseReady(resp)   → rt.socket_recv_data(fd, resp)
+ *   Guest → Host: outb(byte, 0x7860)  → drain_io_writes()  → handleWrite()
+ *   Host → Guest: onResponseReady(resp)
+ *                 → rt.push_io_read(port, 4, seqU32)   ← unblocks inl() poll
+ *                 → rt.push_io_read(port, 1, byte) × N ← data via inb()
  *
  * ## Usage (canary-host.mjs)
  *
  *   const bridge = new VkBridge(plugin);
- *   bridge.onResponseReady = (resp) => rt.socket_recv_data(vkFd, resp);
- *   // In pollNetwork():
- *   bridge.handleWrite(b64ToBytes(send.data));
+ *   bridge.onResponseReady = (resp) => {
+ *       rt.push_io_read(WEBX_PORT, 4, view.getUint32(0, true));
+ *       for (let i = 4; i < resp.length; i++) rt.push_io_read(WEBX_PORT, 1, resp[i]);
+ *   };
+ *   // Each frame: bridge.handleWrite(bytes) with drained outb bytes.
  */
 
 const WEBX_MAGIC       = 0x58574756; /* "VGWX" in little-endian */
