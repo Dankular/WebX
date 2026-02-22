@@ -1,0 +1,15 @@
+# Shell scripts must stay LF — they run in WSL2/Linux (CRLF breaks bash)
+*.sh    text eol=lf
+
+# Text files: auto line endings
+*.md    text
+*.mjs   text
+*.js    text
+*.json  text
+*.html  text
+*.css   text
+
+# Binary — never touch line endings
+*.ext2  binary
+*.so    binary
+*.wasm  binary
