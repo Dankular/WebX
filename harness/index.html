@@ -7,48 +7,99 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #080c10; color: #c8d8e8; font-family: monospace; height: 100dvh; display: flex; flex-direction: column; }
 
+    /* ── Toolbar ── */
     #toolbar {
       display: flex; align-items: center; gap: 12px;
       padding: 8px 16px; background: #0d1620; border-bottom: 1px solid #1e3048;
-      flex-shrink: 0;
+      flex-shrink: 0; z-index: 10;
     }
     #toolbar h1 { font-size: 14px; font-weight: 600; letter-spacing: 2px; color: #4da6ff; }
-    #status { font-size: 12px; color: #5a8ab0; margin-left: auto; }
+    #toolbar-status { font-size: 12px; color: #5a8ab0; margin-left: auto; }
     #launch-btn {
       padding: 6px 16px; background: #1a4a8a; border: 1px solid #4da6ff;
       color: #c8d8e8; font-family: monospace; font-size: 13px;
-      cursor: pointer; border-radius: 3px;
+      cursor: pointer; border-radius: 3px; transition: background .15s;
     }
-    #launch-btn:hover { background: #2a5a9a; }
+    #launch-btn:hover:not(:disabled) { background: #2a5a9a; }
     #launch-btn:disabled { opacity: 0.4; cursor: default; }
 
-    #main { display: flex; flex: 1; overflow: hidden; }
+    /* ── Main layout ── */
+    #main { display: flex; flex: 1; overflow: hidden; position: relative; }
 
     #canvas-wrap {
       flex: 1; display: flex; align-items: center; justify-content: center;
-      background: #000;
+      background: #000; position: relative;
     }
-    canvas {
-      max-width: 100%; max-height: 100%;
-      image-rendering: pixelated;
-    }
+    canvas { max-width: 100%; max-height: 100%; image-rendering: pixelated; }
 
     #console-wrap {
       width: 320px; background: #0a1018; border-left: 1px solid #1e3048;
-      display: flex; flex-direction: column; font-size: 11px;
-      flex-shrink: 0;
+      display: flex; flex-direction: column; font-size: 11px; flex-shrink: 0;
     }
     #console-wrap h2 { padding: 6px 10px; font-size: 11px; color: #5a8ab0; border-bottom: 1px solid #1e3048; }
     #console {
       flex: 1; overflow-y: auto; padding: 8px 10px;
-      white-space: pre-wrap; word-break: break-all; color: #7ab0d0;
-      line-height: 1.5;
+      white-space: pre-wrap; word-break: break-all; color: #7ab0d0; line-height: 1.5;
     }
 
+    /* ── Loader overlay ── */
+    #loader {
+      position: absolute; inset: 0;
+      background: rgba(4, 8, 14, 0.96);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 20; transition: opacity .4s;
+    }
+    #loader.hidden { opacity: 0; pointer-events: none; }
+
+    .loader-box {
+      width: 480px; background: #0d1620; border: 1px solid #1e3048;
+      border-radius: 6px; padding: 28px 32px;
+    }
+    .loader-box h2 {
+      font-size: 13px; letter-spacing: 3px; color: #4da6ff;
+      margin-bottom: 24px; text-align: center;
+    }
+
+    /* Stage list */
+    .stages { display: flex; flex-direction: column; gap: 10px; }
+    .stage {
+      display: flex; align-items: center; gap: 12px;
+      font-size: 12px; color: #3a5a7a; transition: color .2s;
+    }
+    .stage.done    { color: #c8d8e8; }
+    .stage.active  { color: #c8d8e8; }
+    .stage.error   { color: #ff6080; }
+
+    .stage-icon {
+      width: 18px; height: 18px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px;
+    }
+    /* Spinner for active stage */
+    .stage.active .stage-icon::before {
+      content: ''; display: block;
+      width: 14px; height: 14px;
+      border: 2px solid #1e3048; border-top-color: #4da6ff;
+      border-radius: 50%; animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .stage-label { flex: 1; }
+    .stage-detail { font-size: 11px; color: #3a6a9a; white-space: nowrap; }
+
+    /* Progress bar */
+    .stage-bar {
+      height: 2px; background: #0a1828; border-radius: 1px;
+      margin-top: 3px; overflow: hidden; display: none;
+    }
+    .stage.active .stage-bar { display: block; }
+    .stage-bar-fill { height: 100%; background: #4da6ff; transition: width .3s; border-radius: 1px; }
+
+    /* Error banner */
     #error-banner {
       display: none; padding: 10px 16px;
       background: #3a0010; border-top: 1px solid #8a0030;
-      color: #ff6080; font-size: 12px;
+      color: #ff6080; font-size: 12px; flex-shrink: 0;
     }
   </style>
 </head>
@@ -56,56 +107,206 @@
 
 <div id="toolbar">
   <h1>W E B X</h1>
-  <span id="status">Ready</span>
+  <span id="toolbar-status">Ready</span>
   <button id="launch-btn">Launch</button>
 </div>
 
 <div id="main">
   <div id="canvas-wrap">
     <canvas id="game" width="1280" height="720"></canvas>
+
+    <!-- Loader overlay (shown during boot, hidden after) -->
+    <div id="loader">
+      <div class="loader-box">
+        <h2>W E B X  —  BOOTING</h2>
+        <div class="stages" id="stages">
+
+          <div class="stage" id="st-webgpu">
+            <div class="stage-icon"></div>
+            <div class="stage-label">
+              WebGPU &amp; adapter
+              <div class="stage-bar"><div class="stage-bar-fill" style="width:0%"></div></div>
+            </div>
+            <span class="stage-detail"></span>
+          </div>
+
+          <div class="stage" id="st-wasm">
+            <div class="stage-icon"></div>
+            <div class="stage-label">
+              Load Canary WASM
+              <div class="stage-bar"><div class="stage-bar-fill" style="width:0%"></div></div>
+            </div>
+            <span class="stage-detail"></span>
+          </div>
+
+          <div class="stage" id="st-runtime">
+            <div class="stage-icon"></div>
+            <div class="stage-label">
+              Initialize runtime
+              <div class="stage-bar"><div class="stage-bar-fill" style="width:0%"></div></div>
+            </div>
+            <span class="stage-detail"></span>
+          </div>
+
+          <div class="stage" id="st-fs-scan">
+            <div class="stage-icon"></div>
+            <div class="stage-label">
+              Scan ext2 filesystem
+              <div class="stage-bar"><div class="stage-bar-fill" style="width:0%"></div></div>
+            </div>
+            <span class="stage-detail"></span>
+          </div>
+
+          <div class="stage" id="st-fs-apply">
+            <div class="stage-icon"></div>
+            <div class="stage-label">
+              Apply VFS
+              <div class="stage-bar"><div class="stage-bar-fill" style="width:0%"></div></div>
+            </div>
+            <span class="stage-detail"></span>
+          </div>
+
+          <div class="stage" id="st-prefetch">
+            <div class="stage-icon"></div>
+            <div class="stage-label">
+              Prefetch boot binaries
+              <div class="stage-bar"><div class="stage-bar-fill" style="width:0%"></div></div>
+            </div>
+            <span class="stage-detail"></span>
+          </div>
+
+          <div class="stage" id="st-boot">
+            <div class="stage-icon"></div>
+            <div class="stage-label">
+              Start VM
+              <div class="stage-bar"><div class="stage-bar-fill" style="width:0%"></div></div>
+            </div>
+            <span class="stage-detail"></span>
+          </div>
+
+        </div>
+      </div>
+    </div>
   </div>
+
   <div id="console-wrap">
     <h2>Boot console</h2>
     <pre id="console"></pre>
   </div>
 </div>
 
-<div id="error-banner" id="err"></div>
+<div id="error-banner"></div>
 
 <script type="module">
   import { boot } from './canary-host.mjs';
 
-  const canvas     = document.getElementById('game');
-  const consoleEl  = document.getElementById('console');
-  const statusEl   = document.getElementById('status');
-  const launchBtn  = document.getElementById('launch-btn');
+  const canvas      = document.getElementById('game');
+  const consoleEl   = document.getElementById('console');
+  const launchBtn   = document.getElementById('launch-btn');
+  const toolbarStat = document.getElementById('toolbar-status');
   const errorBanner = document.getElementById('error-banner');
+  const loader      = document.getElementById('loader');
 
-  /* ── WebGPU check ── */
+  /* ── Stage helpers ── */
+  const ICONS = { pending: '', done: '✓', error: '✗' };
+
+  function stageEl(id) { return document.getElementById(id); }
+
+  function setStage(id, state, detail = '', pct = null) {
+    const el = stageEl(id);
+    if (!el) return;
+    el.className = 'stage ' + state;
+    const icon  = el.querySelector('.stage-icon');
+    const det   = el.querySelector('.stage-detail');
+    const fill  = el.querySelector('.stage-bar-fill');
+    if (state !== 'active') icon.textContent = ICONS[state] ?? '';
+    else icon.textContent = '';          // spinner via CSS ::before
+    if (det) det.textContent = detail;
+    if (fill && pct !== null) fill.style.width = pct + '%';
+  }
+
+  function hideLoader() {
+    loader.classList.add('hidden');
+    setTimeout(() => loader.remove(), 500);
+  }
+
+  /* ── Checks ── */
   if (!navigator.gpu) {
-    errorBanner.style.display = 'block';
-    errorBanner.textContent = 'WebGPU not available. Use Chrome 113+, Edge 113+, or Firefox Nightly with dom.webgpu.enabled=true.';
+    showError('WebGPU not available. Use Chrome 113+, Edge 113+, or Firefox Nightly with dom.webgpu.enabled=true.');
     launchBtn.disabled = true;
   }
-
-  /* ── SharedArrayBuffer check (COOP/COEP) ── */
   if (!crossOriginIsolated) {
-    errorBanner.style.display = 'block';
-    errorBanner.textContent = 'Cross-origin isolation not active. The server must send COOP/COEP headers. Run: npm run dev';
+    showError('Cross-origin isolation not active. The server must send COOP/COEP headers. Run: npm run dev');
     launchBtn.disabled = true;
   }
 
+  function showError(msg) {
+    errorBanner.style.display = 'block';
+    errorBanner.textContent = msg;
+    toolbarStat.textContent = 'Error';
+  }
+
+  /* ── Status proxy passed to boot() ─────────────────────────────────────────
+   * canary-host.mjs calls statusEl.textContent = '…' to report progress.
+   * We intercept each message and drive the stage UI accordingly.
+   * ────────────────────────────────────────────────────────────────────────── */
+  let _currentStage = null;
+  const statusProxy = {
+    set textContent(msg) {
+      toolbarStat.textContent = msg;
+      if (msg.includes('Loading Canary WASM')   || msg.includes('WASM'))
+        activate('st-wasm');
+      else if (msg.includes('runtime'))
+        activate('st-runtime');
+      else if (msg.includes('Indexing'))
+        activate('st-fs-scan');
+      else if (msg.includes('Applying'))
+        activate('st-fs-apply');
+      else if (msg.includes('Prefetch'))
+        activate('st-prefetch');
+      else if (msg.includes('Booting') || msg.includes('Starting'))
+        activate('st-boot');
+    },
+    get textContent() { return toolbarStat.textContent; },
+  };
+
+  let _stageOrder = ['st-webgpu','st-wasm','st-runtime','st-fs-scan','st-fs-apply','st-prefetch','st-boot'];
+
+  function activate(id) {
+    // Mark everything before this stage as done.
+    const idx = _stageOrder.indexOf(id);
+    for (let i = 0; i < idx; i++) {
+      const el = stageEl(_stageOrder[i]);
+      if (el && !el.classList.contains('done')) setStage(_stageOrder[i], 'done');
+    }
+    if (_currentStage && _currentStage !== id) setStage(_currentStage, 'done');
+    _currentStage = id;
+    setStage(id, 'active');
+  }
+
+  /* Expose stage update so canary-host.mjs can call it for prefetch progress */
+  window.__webxStage = { setStage, activate, stageOrder: _stageOrder };
+
+  /* ── Launch ── */
   launchBtn.addEventListener('click', async () => {
     launchBtn.disabled = true;
-    statusEl.textContent = 'Booting…';
+    toolbarStat.textContent = 'Booting…';
+
+    // WebGPU stage starts immediately
+    activate('st-webgpu');
 
     try {
-      await boot(canvas, consoleEl);
-      statusEl.textContent = 'Running';
+      await boot(canvas, consoleEl, statusProxy);
+
+      // All stages done
+      _stageOrder.forEach(id => setStage(id, 'done'));
+      toolbarStat.textContent = 'Running';
+      setTimeout(hideLoader, 800);
+
     } catch (err) {
-      statusEl.textContent = 'Error';
-      errorBanner.style.display = 'block';
-      errorBanner.textContent = err.message;
+      if (_currentStage) setStage(_currentStage, 'error', err.message.slice(0, 40));
+      toolbarStat.textContent = 'Error';
+      showError(err.message);
       console.error(err);
       launchBtn.disabled = false;
     }

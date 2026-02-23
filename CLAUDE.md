@@ -131,67 +131,72 @@ steam/steamos-rootfs.img     ~5,120 MB  ← rootfs partition extracted         �
 4. Run `ldconfig`
 5. Convert ext4 → ext2 via `tune2fs`
 
+## Environment (Windows Server 2022, EFRET-DEVSERV, user: sysadmin)
+
+- SteamOS image: `C:\Users\sysadmin\Downloads\steamdeck-repair-20250521.10-3.7.7.img.bz2`
+- Repos at: `Z:\Repos\WebSteamOS\{WebX,Canary,VkWebGPU-ICD}` (siblings, one level up from WebX)
+- Node.js v25, Rust stable 1.93.1, Python 3.14, wasm-pack installed
+- WSL Ubuntu installed: `wsl -d Ubuntu`; Z: mounted via `/etc/wsl.conf` boot command
+- **Canary path**: `../Canary` relative to WebX (one level up, not two)
+
+## Current Status (2026-02-22)
+
+| Step | Status |
+|------|--------|
+| Canary I/O port emulation (`canary-io`) | ✅ Complete |
+| Canary WASM build | ✅ `Canary/crates/canary-wasm/pkg/` |
+| libvkwebx.so cross-compile | ✅ `WebX/build/guest-icd/libvkwebx.so` |
+| SteamOS image decompressed | ✅ `steam/steamdeck-repair.img` (7.3 GB) |
+| extract-rootfs.sh (ICD install + ext4→ext2) | 🔄 Running in WSL Ubuntu |
+| `steam/steamos-webx.ext2` | ⏳ Pending extract-rootfs.sh |
+| `npm run dev` | ⏳ Pending steamos-webx.ext2 |
+
 ## Current Blockers
 
-### WSL2 Broken
-```
-> wsl --status
-Error code: Wsl/REGDB_E_CLASSNOTREGISTERED
-```
-**Fix after reboot:**
-1. Open "Turn Windows features on or off"
-2. Enable: **Windows Subsystem for Linux** + **Virtual Machine Platform**
-3. Reboot
-4. `wsl --install Ubuntu`
-5. Then run: `bash steam/extract-rootfs.sh steam/steamdeck-repair.img steam/`
+### extract-rootfs.sh running
+Wait for completion, then: `npm run dev` → `http://localhost:3000`
 
-### libvkwebx.so not yet compiled
-Needs WSL (or Docker) with cross-compile toolchain:
+### SteamOS repair image partition layout
+```
+p1: 64 MB  EFI System
+p2: 128 MB Microsoft basic data (recovery)
+p3: 5 GB   Linux root x86-64  ← rootfs (extract-rootfs.sh uses p3)
+p4: 256 MB Linux variable data
+p5: 1.6 GB Linux home
+```
+
+## WSL Build Commands (Ubuntu, Z: auto-mounted)
+
 ```bash
-# In WSL Ubuntu:
-sudo apt-get install -y cmake gcc-x86-64-linux-gnu libvulkan-dev
-# In repo root:
-npm run build:icd
-# Or via Docker (if Docker Desktop installed):
-npm run build:icd:docker
+# Cross-compile libvkwebx.so
+sudo apt-get install -y cmake gcc-x86-64-linux-gnu libvulkan-dev libxcb1-dev
+WEBX=/mnt/z/Repos/WebSteamOS/WebX
+cmake -B $WEBX/build/guest-icd $WEBX/guest-icd/ \
+  -DCMAKE_TOOLCHAIN_FILE=$WEBX/cmake/x86_64-linux-gnu.cmake \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build $WEBX/build/guest-icd --parallel 4
+
+# Install ICD into SteamOS image (ext4→ext2)
+cd /mnt/z/Repos/WebSteamOS/WebX
+bash steam/extract-rootfs.sh steam/steamdeck-repair.img steam/
 ```
-Output: `build/guest-icd/libvkwebx.so`
-
-### Canary IN/OUT port emulation
-`registerPortListener` not yet wired up in Canary.
-Tracking: implement x86 I/O port opcode emulation (0xEC/0xED/0xEE/0xEF) in
-`crates/canary-cpu/src/interpreter.rs`, then expose `registerPortListener` in
-the WASM bindings and CanaryRuntime.
-Until done, the Vulkan bridge will log a warning but not function.
-
-### SteamOS image not yet served
-After building libvkwebx.so and running extract-rootfs.sh:
-- Serve `steam/steamos-webx.ext2` via `npm run dev`
-- Update `STEAMOS_IMAGE_URL` constant in `harness/canary-host.mjs` if needed
-- Run `npm run dev` and open `http://localhost:3000`
 
 ## npm Scripts
 
 ```bash
 npm run dev              # Start browser dev server (port 3000)
-npm run build:canary     # Build Canary WASM (cd ../../Canary && npm run build:wasm)
+npm run build:canary     # Build Canary WASM (cd ../Canary && npm run build:wasm)
 npm run extract:image    # Decompress .bz2 + extract rootfs (Windows, Python)
 npm run extract:rootfs   # Install ICD into image, ext4→ext2 (Linux/WSL)
 npm run build:icd        # Cross-compile libvkwebx.so (WSL required)
-npm run build:icd:docker # Same via Docker (Docker Desktop required)
+npm run build:icd:docker # Same via Docker (needs libxcb1-dev)
 ```
 
 ## Immediate Next Steps
 
-1. **Implement IN/OUT port emulation in Canary** — opcodes 0xEC–0xEF in
-   `D:\Dev Proj\Canary\crates\canary-cpu\src\interpreter.rs`
-2. **Expose `registerPortListener` in Canary WASM bindings**
-3. **Fix WSL2** → enable WSL + VMP → reboot → `wsl --install Ubuntu`
-4. **Build libvkwebx.so**: `npm run build:icd` from WSL
-5. **Install ICD into SteamOS image**: `bash steam/extract-rootfs.sh steam/steamdeck-repair.img steam/`
-6. **Build Canary**: `npm run build:canary`
-7. **Run dev server**: `npm run dev`, open localhost:3000
-8. **Wire in real VkWebGPU-ICD** when ready: edit `harness/vkwebgpu-plugin.mjs` `loadPlugin()`
+1. **Wait for `extract-rootfs.sh`**: produces `steam/steamos-webx.ext2`
+2. **Run dev server**: `npm run dev`, open `http://localhost:3000`
+3. **Wire in real VkWebGPU-ICD** when ready: edit `harness/vkwebgpu-plugin.mjs` `loadPlugin()`
 
 ## Canary API Reference (confirmed from canary_wasm.d.ts + harness/canary-host.mjs)
 

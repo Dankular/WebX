@@ -80,7 +80,7 @@ const _wsMap = new Map();
 
 /* ── Boot ─────────────────────────────────────────────────────────────────── */
 
-export async function boot(canvas, consoleEl) {
+export async function boot(canvas, consoleEl, statusEl) {
     if (!navigator.gpu)
         throw new Error('WebGPU not available. Use Chrome 113+, Edge 113+, or Firefox Nightly.');
 
@@ -134,15 +134,126 @@ export async function boot(canvas, consoleEl) {
     const rt = new CanaryRuntime();
     console.log('[WebX] Canary runtime ready.');
 
-    /* ── Fetch and mount SteamOS ext2 image ── */
-    console.log(`[WebX] Fetching guest image: ${STEAMOS_IMAGE_URL}`);
-    const imgResp = await fetch(STEAMOS_IMAGE_URL);
-    if (!imgResp.ok)
-        throw new Error(`Failed to fetch guest image: HTTP ${imgResp.status}`);
-    const imgBytes = new Uint8Array(await imgResp.arrayBuffer());
-    console.log(`[WebX] Image: ${(imgBytes.byteLength / 1024 / 1024).toFixed(0)} MiB`);
-    rt.load_fs_image(imgBytes);
-    console.log('[WebX] VFS populated from ext2 image.');
+    /* ── Lazy-load SteamOS ext2/ext4 filesystem via HTTP Range requests ── */
+    /*
+     * Instead of downloading the full ~7 GiB image (impossible: wasm32 has a
+     * 4 GiB hard memory limit), we traverse the filesystem block-by-block using
+     * server Range requests.  Only the blocks actually needed — superblock, BGDT,
+     * inode tables, directory data, and small file content — are fetched.
+     *
+     * stage_vfs_from_url() is a free wasm-bindgen async function that builds a
+     * MemFs in a thread-local staging area.  apply_staged_vfs() then merges it
+     * into the runtime's VFS.
+     */
+    const setStatus = (msg) => { if (statusEl) statusEl.textContent = msg; };
+
+    console.log(`[WebX] Lazy-loading ext2 filesystem: ${STEAMOS_IMAGE_URL}`);
+    setStatus('Indexing filesystem…');
+
+    try {
+        await wasmMod.stage_vfs_from_url(STEAMOS_IMAGE_URL);
+    } catch (e) {
+        throw new Error(`[WebX] stage_vfs_from_url failed: ${e}`);
+    }
+
+    setStatus('Applying filesystem…');
+    const fsOk = rt.apply_staged_vfs();
+    if (!fsOk)
+        throw new Error('apply_staged_vfs() returned false — no staged VFS available.');
+
+    console.log('[WebX] VFS populated from ext2 image via lazy block loading.');
+
+    /* ── Launch target (declared here so VFS overlay below can reference it) ── */
+    const LAUNCH_BIN  = '/bin/bash';
+    const LAUNCH_ARGS = ['/opt/webx/launch.sh'];
+
+    /* ── Prefetch critical binaries from ext2 image ──────────────────────────
+     * populate_memfs only builds directory structure + symlinks; file content
+     * is empty until explicitly fetched.  We eagerly fetch the files that must
+     * be readable before the first instruction executes.  Symlinks are resolved
+     * by the VFS, so we fetch the real targets directly.
+     *
+     * For each path: try to fetch; if it fails (unknown path, device node, etc.)
+     * just log and continue — a missing non-critical file shouldn't block boot.
+     * ────────────────────────────────────────────────────────────────────────── */
+    const PREFETCH_PATHS = [
+        // Shell + dynamic linker
+        // SteamOS 3.x (Arch-based): /lib → /usr/lib, so real paths are under /usr/lib
+        '/usr/bin/bash',
+        '/bin/bash',
+        '/usr/lib/ld-linux-x86-64.so.2',          // Arch/SteamOS
+        '/usr/lib64/ld-linux-x86-64.so.2',         // Fedora/RHEL style
+        '/lib64/ld-linux-x86-64.so.2',             // Debian-old / symlink path
+        '/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2',
+        // Core C runtime
+        '/usr/lib/libc.so.6',                       // Arch/SteamOS
+        '/usr/lib/x86_64-linux-gnu/libc.so.6',     // Debian
+        '/lib/x86_64-linux-gnu/libc.so.6',
+        '/usr/lib/libm.so.6',
+        '/usr/lib/x86_64-linux-gnu/libm.so.6',
+        '/usr/lib/libdl.so.2',
+        '/usr/lib/x86_64-linux-gnu/libdl.so.2',
+        '/usr/lib/libpthread.so.0',
+        '/usr/lib/x86_64-linux-gnu/libpthread.so.0',
+        '/usr/lib/libtinfo.so.6',
+        '/usr/lib/x86_64-linux-gnu/libtinfo.so.6',
+        '/usr/lib/libreadline.so.8',
+        '/usr/lib/x86_64-linux-gnu/libreadline.so.8',
+        // nsswitch / passwd (glibc reads these early)
+        '/etc/nsswitch.conf',
+        '/etc/passwd',
+        '/etc/ld.so.cache',
+        '/etc/ld.so.conf',
+    ];
+
+    // Resolve a symlink target path relative to its symlink location.
+    function resolveSymlinkTarget(symlinkPath, target) {
+        if (target.startsWith('/')) return target;
+        const dir = symlinkPath.slice(0, symlinkPath.lastIndexOf('/') + 1);
+        const parts = (dir + target).split('/');
+        const resolved = [];
+        for (const p of parts) {
+            if (p === '..') resolved.pop();
+            else if (p && p !== '.') resolved.push(p);
+        }
+        return '/' + resolved.join('/');
+    }
+
+    // Fetch one file from ext2, following symlinks up to 4 levels deep.
+    async function fetchExt2Resolved(fpath, depth = 0) {
+        if (depth > 4) return null;
+        let data;
+        try { data = await wasmMod.fetch_ext2_file(fpath); }
+        catch (_) { return null; }
+        if (!data || data.byteLength === 0) return null;
+        // Heuristic: if content is short (<= 512 bytes) and looks like a path
+        // (printable ASCII, contains '/'), treat it as a symlink target.
+        if (data.byteLength <= 512) {
+            const text = new TextDecoder().decode(data).replace(/\0+$/, '');
+            if (/^[./][\x20-\x7E]*$/.test(text) && text.includes('/')) {
+                const resolved = resolveSymlinkTarget(fpath, text);
+                return fetchExt2Resolved(resolved, depth + 1);
+            }
+        }
+        return data;
+    }
+
+    setStatus('Prefetching boot binaries…');
+    const prefetchSeen = new Set();
+    let prefetched = 0;
+    for (const fpath of PREFETCH_PATHS) {
+        if (prefetchSeen.has(fpath)) continue;
+        prefetchSeen.add(fpath);
+        const data = await fetchExt2Resolved(fpath);
+        if (data && data.byteLength > 0) {
+            rt.add_file(fpath, data);
+            prefetched++;
+            console.log(`[WebX] prefetched ${fpath} (${data.byteLength} bytes)`);
+        } else {
+            console.debug(`[WebX] prefetch skip: ${fpath}`);
+        }
+    }
+    console.log(`[WebX] Prefetch complete: ${prefetched}/${PREFETCH_PATHS.length} paths resolved.`);
 
     /* ── VFS overlay: /proc stubs + Vulkan ICD ── */
     /*
@@ -226,10 +337,30 @@ export async function boot(canvas, consoleEl) {
     }
 
     /* ── Framebuffer rendering (/dev/fb0 → HTML canvas) ── */
+    // The main `canvas` already has a WebGPU context (acquired by plugin.initialize).
+    // A canvas can only hold one rendering context, so we blit the guest framebuffer
+    // through a same-size OffscreenCanvas (2D) and then drawImage it onto the main canvas.
+    // If the plugin is a stub (no real WebGPU output), this makes fb0 visible directly.
     canvas.width  = FB_WIDTH;
     canvas.height = FB_HEIGHT;
-    const ctx2d = canvas.getContext('2d');
+    const fbOffscreen = new OffscreenCanvas(FB_WIDTH, FB_HEIGHT);
+    const ctx2d       = fbOffscreen.getContext('2d');
     const fbImageData = ctx2d.createImageData(FB_WIDTH, FB_HEIGHT);
+    // We need a 2D context on the main canvas to drawImage from the offscreen canvas,
+    // but it already has webgpu. Use ImageBitmap → GPU texture path instead.
+    // Simplest compat path: if the main canvas is webgpu-bound we create a parallel
+    // visible overlay canvas for the fb0 output.
+    let fbTargetCtx = canvas.getContext('2d');   // null if webgpu already bound
+    let fbOverlay   = null;
+    if (!fbTargetCtx) {
+        fbOverlay = document.createElement('canvas');
+        fbOverlay.width  = FB_WIDTH;
+        fbOverlay.height = FB_HEIGHT;
+        fbOverlay.style.cssText = canvas.style.cssText +
+            ';position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none';
+        canvas.parentElement?.insertBefore(fbOverlay, canvas.nextSibling);
+        fbTargetCtx = fbOverlay.getContext('2d');
+    }
 
     function renderFramebuffer() {
         if (!rt.has_framebuffer()) return;
@@ -244,6 +375,7 @@ export async function boot(canvas, consoleEl) {
             rgba[i + 3] = 255;
         }
         ctx2d.putImageData(fbImageData, 0, 0);
+        fbTargetCtx.drawImage(fbOffscreen, 0, 0);
     }
 
     /* ── x86 I/O port bridge (0x7860) ── */
@@ -442,8 +574,6 @@ export async function boot(canvas, consoleEl) {
     ];
 
     /* ── Locate and start bash ── */
-    const LAUNCH_BIN  = '/bin/bash';
-    const LAUNCH_ARGS = ['/opt/webx/launch.sh'];
 
     if (!rt.path_exists(LAUNCH_BIN))
         throw new Error(`Canary VFS: '${LAUNCH_BIN}' not found — is the guest image mounted?`);
