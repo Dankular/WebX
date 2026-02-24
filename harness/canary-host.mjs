@@ -609,6 +609,45 @@ export async function boot(canvas, consoleEl, statusEl) {
     if (!elfReady)
         throw new Error('Canary: prepare_elf() failed — check console for details.');
 
+    /* ── Tier-1 JIT compilation loop ── */
+    /*
+     * Each frame, drain any basic blocks that the Rust JIT has promoted
+     * to Tier-1 (hit_count >= 16).  Each entry is a {rip, wasm} record
+     * where `wasm` is a self-contained WASM module that exports a `run`
+     * function.  We compile it synchronously (small modules — typically
+     * < 200 bytes) and hand the resulting function back to the runtime
+     * via register_compiled_block().  Subsequent hits on the same block
+     * will call the browser-JIT-compiled native code instead of the
+     * interpreter.
+     *
+     * The module imports only `env.memory` — the same linear memory
+     * used by the main Canary WASM binary so guest register state
+     * (GPRs stored in a flat i64[17] array) is shared.
+     */
+    let _jitSharedMemory = null;
+
+    function drainJitQueue() {
+        let pending;
+        try { pending = rt.drain_jit_queue(); } catch (_) { return; }
+        if (!pending || pending.length === 0) return;
+
+        /* Lazily obtain the Canary WASM linear memory (static method). */
+        if (!_jitSharedMemory) {
+            try { _jitSharedMemory = CanaryRuntime.wasm_memory(); }
+            catch (_) { return; }
+        }
+
+        for (const { rip, wasm } of pending) {
+            try {
+                const mod  = new WebAssembly.Module(wasm);
+                const inst = new WebAssembly.Instance(mod, { env: { memory: _jitSharedMemory } });
+                rt.register_compiled_block(rip, inst.exports.run);
+            } catch (e) {
+                console.warn(`[WebX] JIT compile failed rip=0x${rip.toString(16)}:`, e.message);
+            }
+        }
+    }
+
     /* ── Step loop (requestAnimationFrame-driven) ── */
     /*
      * Run guest instructions for FRAME_BUDGET_MS per animation frame.
@@ -632,6 +671,7 @@ export async function boot(canvas, consoleEl, statusEl) {
         drainOutput();
         drainIoPorts();
         drainCloneRequests();
+        drainJitQueue();
         renderFramebuffer();
 
         if (alive) {

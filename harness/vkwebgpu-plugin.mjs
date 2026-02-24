@@ -658,11 +658,46 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
         const src = this.#swapImages[(this.#swapIndex + n - 1) % n];
         const dst = this.#ctx.getCurrentTexture();
         const enc = this.#device.createCommandEncoder({ label: 'vk-present' });
-        enc.copyTextureToTexture(
-            { texture: src },
-            { texture: dst },
-            [Math.min(src.width, dst.width), Math.min(src.height, dst.height), 1],
-        );
+
+        if (src.format === dst.format) {
+            // Same format — fast path: direct GPU copy.
+            enc.copyTextureToTexture(
+                { texture: src },
+                { texture: dst },
+                [Math.min(src.width, dst.width), Math.min(src.height, dst.height), 1],
+            );
+        } else {
+            // Format mismatch (e.g. bgra8unorm swapchain → rgba8unorm canvas on Chrome).
+            // Use the shared blit pipeline so the format conversion happens in the shader.
+            const blitPipe = this.#getBlitPipeline(dst.format);
+            if (blitPipe) {
+                const srcView = src.createView();
+                const dstView = dst.createView();
+                const bg = this.#device.createBindGroup({
+                    layout: this.#blitBGL,
+                    entries: [
+                        { binding: 0, resource: srcView },
+                        { binding: 1, resource: this.#blitSampler },
+                    ],
+                });
+                const blitRP = enc.beginRenderPass({
+                    colorAttachments: [{ view: dstView, loadOp: 'clear', storeOp: 'store',
+                                        clearValue: { r:0,g:0,b:0,a:1 } }],
+                });
+                blitRP.setPipeline(blitPipe);
+                blitRP.setBindGroup(0, bg);
+                blitRP.draw(3);
+                blitRP.end();
+            } else {
+                // Blit pipeline not ready yet — fallback copy (may be wrong colour).
+                enc.copyTextureToTexture(
+                    { texture: src },
+                    { texture: dst },
+                    [Math.min(src.width, dst.width), Math.min(src.height, dst.height), 1],
+                );
+            }
+        }
+
         this.#device.queue.submit([enc.finish()]);
         return ok();
     }
