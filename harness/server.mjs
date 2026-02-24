@@ -22,9 +22,9 @@
  *
  * ── Verbose client tracking ──────────────────────────────────────────────────
  *
- * Each TCP connection gets a short UUID (8 hex chars) for log correlation.
- * Because browsers open multiple parallel connections (HTTP/1.1), you will
- * see several conn-IDs per browser tab — each handles a different file.
+ * Each TLS session gets a short UUID (8 hex chars) for log correlation.
+ * With HTTP/2, all requests from one browser tab share a single TLS session,
+ * so you will see one conn-ID per browser tab (unlike HTTP/1.1's 6 sockets).
  *
  * Inferred client states (from request patterns):
  *   connected → init → loading-js → loading-wasm →
@@ -44,7 +44,7 @@
  *   DISCONNECTED — socket closed; session summary (duration, bytes, req count)
  */
 
-import { createServer }                                    from 'node:https';
+import http2                                               from 'node:http2';
 import { createReadStream, mkdirSync,
          readFileSync, writeFileSync, existsSync }         from 'node:fs';
 import { stat }                                           from 'node:fs/promises';
@@ -248,7 +248,10 @@ function inferState(client, path, isRange) {
 const LARGE_LOG_THRESHOLD = 1 * 1024 * 1024;   //  1 MiB
 const PROGRESS_THRESHOLD  = 10 * 1024 * 1024;  // 10 MiB
 
-createServer({ key: TLS_KEY, cert: TLS_CERT }, async (req, res) => {
+// HTTP/2 with allowHTTP1 fallback — Chrome multiplexes dozens of Range
+// requests over a single H2 connection, bypassing the HTTP/1.1 6-connection
+// limit that previously capped ext2 block-scan throughput.
+http2.createSecureServer({ allowHTTP1: true, key: TLS_KEY, cert: TLS_CERT }, async (req, res) => {
     const client = getClient(req);
     client.requestCount++;
 

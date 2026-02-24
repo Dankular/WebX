@@ -220,22 +220,32 @@ export async function boot(canvas, consoleEl, statusEl) {
     }
 
     // Fetch one file from ext2, following symlinks up to 4 levels deep.
+    // Returns { data: Uint8Array, resolvedPath: string } or null.
     async function fetchExt2Resolved(fpath, depth = 0) {
         if (depth > 4) return null;
         let data;
         try { data = await wasmMod.fetch_ext2_file(fpath); }
         catch (_) { return null; }
         if (!data || data.byteLength === 0) return null;
-        // Heuristic: if content is short (<= 512 bytes) and looks like a path
-        // (printable ASCII, contains '/'), treat it as a symlink target.
-        if (data.byteLength <= 512) {
-            const text = new TextDecoder().decode(data).replace(/\0+$/, '');
-            if (/^[./][\x20-\x7E]*$/.test(text) && text.includes('/')) {
-                const resolved = resolveSymlinkTarget(fpath, text);
-                return fetchExt2Resolved(resolved, depth + 1);
+        // Heuristic: detect symlink targets.
+        // A symlink target is short (<= 255 bytes), contains only printable non-whitespace
+        // ASCII, and is not an ELF binary or shell script.
+        // This handles both absolute (/usr/lib/foo) and relative (libfoo.so.6) targets.
+        if (data.byteLength <= 255) {
+            const isELF     = data[0] === 0x7f && data[1] === 0x45; // \x7fE
+            const isShebang = data[0] === 0x23 && data[1] === 0x21; // #!
+            if (!isELF && !isShebang) {
+                const text = new TextDecoder().decode(data).replace(/\0+$/, '');
+                if (text.length > 0 && /^[^\s\0\x01-\x1f\x7f]+$/.test(text)) {
+                    const resolved = resolveSymlinkTarget(fpath, text);
+                    if (resolved !== fpath) {
+                        const result = await fetchExt2Resolved(resolved, depth + 1);
+                        if (result) return { data: result.data, resolvedPath: result.resolvedPath };
+                    }
+                }
             }
         }
-        return data;
+        return { data, resolvedPath: fpath };
     }
 
     setStatus('Prefetching boot binaries…');
@@ -244,11 +254,19 @@ export async function boot(canvas, consoleEl, statusEl) {
     for (const fpath of PREFETCH_PATHS) {
         if (prefetchSeen.has(fpath)) continue;
         prefetchSeen.add(fpath);
-        const data = await fetchExt2Resolved(fpath);
-        if (data && data.byteLength > 0) {
-            rt.add_file(fpath, data);
+        const result = await fetchExt2Resolved(fpath);
+        if (result && result.data.byteLength > 0) {
+            rt.add_file(fpath, result.data);
+            // Also register under the real resolved path (e.g. libreadline.so.8.2 when
+            // fetched via the libreadline.so.8 symlink) so the VFS serves it under both names.
+            if (result.resolvedPath !== fpath && !prefetchSeen.has(result.resolvedPath)) {
+                rt.add_file(result.resolvedPath, result.data);
+                prefetchSeen.add(result.resolvedPath);
+                console.log(`[WebX] prefetched ${fpath} → ${result.resolvedPath} (${result.data.byteLength} bytes)`);
+            } else {
+                console.log(`[WebX] prefetched ${fpath} (${result.data.byteLength} bytes)`);
+            }
             prefetched++;
-            console.log(`[WebX] prefetched ${fpath} (${data.byteLength} bytes)`);
         } else {
             console.debug(`[WebX] prefetch skip: ${fpath}`);
         }
