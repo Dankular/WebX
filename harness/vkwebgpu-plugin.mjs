@@ -88,31 +88,81 @@ const FC_SET_DEPTH_BOUNDS        = 0x00AC;
 const FC_DISPATCH_BASE           = 0x00AD;
 
 // ── VkFormat → GPUTextureFormat ───────────────────────────────────────────────
-// Only the subset that WebGPU supports natively.
+// Keyed by raw VkFormat enum values (vulkan_core.h).
 const VK_FORMAT_MAP = {
-    9:   'r8uint',
-    16:  'r8unorm',
-    20:  'r8snorm',
-    37:  'rgba8unorm',
-    38:  'rgba8unorm-srgb',
-    41:  'rgba8uint',
-    44:  'bgra8unorm',
-    50:  'bgra8unorm-srgb',
-    64:  'rgba16uint',
-    65:  'rgba16sint',
-    70:  'rgba16float',
-    97:  'r32float',
-    98:  'r32uint',
-    99:  'r32sint',
-    103: 'rg32float',
-    104: 'rg32uint',
-    109: 'rgba32float',
-    110: 'rgba32uint',
-    116: 'rgba32float',
-    124: 'depth32float',
-    125: 'stencil8',
-    129: 'depth32float-stencil8',
-    130: 'depth24plus-stencil8',
+    // R8
+    9:   'r8unorm',           // VK_FORMAT_R8_UNORM
+    10:  'r8snorm',           // VK_FORMAT_R8_SNORM
+    13:  'r8uint',            // VK_FORMAT_R8_UINT
+    14:  'r8sint',            // VK_FORMAT_R8_SINT
+    // R8G8
+    16:  'rg8unorm',          // VK_FORMAT_R8G8_UNORM
+    17:  'rg8snorm',          // VK_FORMAT_R8G8_SNORM
+    20:  'rg8uint',           // VK_FORMAT_R8G8_UINT
+    21:  'rg8sint',           // VK_FORMAT_R8G8_SINT
+    // R8G8B8A8
+    37:  'rgba8unorm',        // VK_FORMAT_R8G8B8A8_UNORM
+    38:  'rgba8snorm',        // VK_FORMAT_R8G8B8A8_SNORM
+    41:  'rgba8uint',         // VK_FORMAT_R8G8B8A8_UINT
+    42:  'rgba8sint',         // VK_FORMAT_R8G8B8A8_SINT
+    43:  'rgba8unorm-srgb',   // VK_FORMAT_R8G8B8A8_SRGB
+    // B8G8R8A8
+    44:  'bgra8unorm',        // VK_FORMAT_B8G8R8A8_UNORM
+    50:  'bgra8unorm-srgb',   // VK_FORMAT_B8G8R8A8_SRGB
+    // Packed 10-bit
+    64:  'rgb10a2unorm',      // VK_FORMAT_A2B10G10R10_UNORM_PACK32
+    68:  'rgb10a2uint',       // VK_FORMAT_A2B10G10R10_UINT_PACK32
+    // R16
+    74:  'r16uint',           // VK_FORMAT_R16_UINT
+    75:  'r16sint',           // VK_FORMAT_R16_SINT
+    76:  'r16float',          // VK_FORMAT_R16_SFLOAT
+    // R16G16
+    81:  'rg16uint',          // VK_FORMAT_R16G16_UINT
+    82:  'rg16sint',          // VK_FORMAT_R16G16_SINT
+    83:  'rg16float',         // VK_FORMAT_R16G16_SFLOAT  ← DXVK heavy use
+    // R16G16B16A16
+    91:  'rgba16unorm',       // VK_FORMAT_R16G16B16A16_UNORM  (requires 16bit-norm feature)
+    95:  'rgba16uint',        // VK_FORMAT_R16G16B16A16_UINT
+    96:  'rgba16sint',        // VK_FORMAT_R16G16B16A16_SINT
+    97:  'rgba16float',       // VK_FORMAT_R16G16B16A16_SFLOAT  ← DXVK render targets
+    // R32
+    98:  'r32uint',           // VK_FORMAT_R32_UINT
+    99:  'r32sint',           // VK_FORMAT_R32_SINT
+    100: 'r32float',          // VK_FORMAT_R32_SFLOAT
+    // R32G32
+    101: 'rg32uint',          // VK_FORMAT_R32G32_UINT
+    102: 'rg32sint',          // VK_FORMAT_R32G32_SINT
+    103: 'rg32float',         // VK_FORMAT_R32G32_SFLOAT
+    // R32G32B32A32
+    107: 'rgba32uint',        // VK_FORMAT_R32G32B32A32_UINT
+    108: 'rgba32sint',        // VK_FORMAT_R32G32B32A32_SINT
+    109: 'rgba32float',       // VK_FORMAT_R32G32B32A32_SFLOAT
+    // Packed float
+    122: 'rg11b10ufloat',     // VK_FORMAT_B10G11R11_UFLOAT_PACK32
+    // Depth / Stencil
+    124: 'depth16unorm',      // VK_FORMAT_D16_UNORM
+    125: 'depth24plus',       // VK_FORMAT_X8_D24_UNORM_PACK32
+    126: 'depth32float',      // VK_FORMAT_D32_SFLOAT
+    127: 'stencil8',          // VK_FORMAT_S8_UINT
+    129: 'depth24plus-stencil8',      // VK_FORMAT_D24_UNORM_S8_UINT
+    130: 'depth32float-stencil8',     // VK_FORMAT_D32_SFLOAT_S8_UINT
+    // BC compressed (require 'texture-compression-bc' feature)
+    131: 'bc1-rgba-unorm',    // VK_FORMAT_BC1_RGB_UNORM_BLOCK
+    132: 'bc1-rgba-unorm-srgb',
+    133: 'bc1-rgba-unorm',    // VK_FORMAT_BC1_RGBA_UNORM_BLOCK
+    134: 'bc1-rgba-unorm-srgb',
+    135: 'bc2-rgba-unorm',    // VK_FORMAT_BC2_UNORM_BLOCK
+    136: 'bc2-rgba-unorm-srgb',
+    137: 'bc3-rgba-unorm',    // VK_FORMAT_BC3_UNORM_BLOCK
+    138: 'bc3-rgba-unorm-srgb',
+    139: 'bc4-r-unorm',       // VK_FORMAT_BC4_UNORM_BLOCK
+    140: 'bc4-r-snorm',
+    141: 'bc5-rg-unorm',      // VK_FORMAT_BC5_UNORM_BLOCK
+    142: 'bc5-rg-snorm',
+    143: 'bc6h-rgb-ufloat',   // VK_FORMAT_BC6H_UFLOAT_BLOCK
+    144: 'bc6h-rgb-float',    // VK_FORMAT_BC6H_SFLOAT_BLOCK
+    145: 'bc7-rgba-unorm',    // VK_FORMAT_BC7_UNORM_BLOCK
+    146: 'bc7-rgba-unorm-srgb',
 };
 
 // ── VkAttachmentLoadOp / VkAttachmentStoreOp ──────────────────────────────────
@@ -280,6 +330,22 @@ export class VkWebGPUPlugin {
     #swapFormat      = 'bgra8unorm';
     #swapIndex       = 0;
 
+    // ── Extended dynamic state ────────────────────────────────────────────────
+    // Tracks state set by FC_SET_* commands (VK_EXT_extended_dynamic_state).
+    #dynState = { cullMode: 0, frontFace: 0, topology: 3,
+                  depthTestEnable: 0, depthWriteEnable: 0, depthCompareOp: 1,
+                  stencilTestEnable: 0, depthBiasEnable: 0 };
+    #dynDirty  = false;                // true when state changed since last setPipeline
+    #boundPipeH = null;               // handle of currently bound graphics pipeline
+    #pipelineCreateInfos = new Map(); // handle → GPURenderPipelineDescriptor (sans dynamic parts)
+    #pipelineVariants    = new Map(); // variantKey → GPURenderPipeline
+
+    // ── Blit pipeline (for FC_BLIT_IMAGE scaled copies) ───────────────────────
+    #blitBGL       = null;            // BindGroupLayout: texture2d + sampler
+    #blitSampler   = null;            // GPUSampler (linear, clamp)
+    #blitPipelines = new Map();       // dstFormat → GPURenderPipeline
+    #blitShaderMod = null;            // shared vertex+fragment shader module
+
     // ── Push constant staging buffer (256 bytes max) ──────────────────────────
     #pushConstData   = new Uint8Array(256);
     #pushConstBGL    = null;  // GPUBindGroupLayout for the 256-byte push-constant UBO
@@ -310,6 +376,31 @@ export class VkWebGPUPlugin {
         this.#pushConstBG = device.createBindGroup({
             label: 'push-const-bg', layout: this.#pushConstBGL,
             entries: [{ binding: 0, resource: { buffer: this.#pushConstBuffer } }],
+        });
+
+        // Blit pipeline resources — shared across all blit operations.
+        this.#blitBGL = device.createBindGroupLayout({
+            label: 'blit-bgl',
+            entries: [
+                { binding: 0, visibility: 2, texture: { sampleType: 'float', viewDimension: '2d' } },
+                { binding: 1, visibility: 2, sampler: { type: 'filtering' } },
+            ],
+        });
+        this.#blitSampler = device.createSampler({ minFilter: 'linear', magFilter: 'linear' });
+        this.#blitShaderMod = device.createShaderModule({
+            label: 'blit-shader',
+            code: `
+@group(0) @binding(0) var srcTex : texture_2d<f32>;
+@group(0) @binding(1) var srcSamp: sampler;
+struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+@vertex fn vs_main(@builtin(vertex_index) vi: u32) -> VSOut {
+    var pos = array<vec2f,3>(vec2f(-1.0,-1.0), vec2f(3.0,-1.0), vec2f(-1.0, 3.0));
+    var uv  = array<vec2f,3>(vec2f( 0.0, 1.0), vec2f(2.0,  1.0), vec2f( 0.0,-1.0));
+    return VSOut(vec4f(pos[vi], 0.0, 1.0), uv[vi]);
+}
+@fragment fn fs_main(in: VSOut) -> @location(0) vec4f {
+    return textureSample(srcTex, srcSamp, in.uv);
+}`,
         });
 
         console.log('[VkWebGPUPlugin] initialized —', adapter.info?.description ?? '(no description)');
@@ -960,6 +1051,28 @@ export class VkWebGPUPlugin {
             if (!plData?.gpuLayout) console.warn(`[VkWebGPUPlugin] gp_${h}: no gpuLayout for layout ${layoutH}`);
             if (!vertMod)           console.warn(`[VkWebGPUPlugin] gp_${h}: no vertex module`);
         }
+        // Save descriptor for dynamic-state variant recreation.
+        if (plData?.gpuLayout && vertMod) {
+            this.#pipelineCreateInfos.set(h, {
+                label:  `gp_${h}_dyn`,
+                layout: plData.gpuLayout,
+                vertex: { module: vertMod, entryPoint: vertEntry, buffers: vtxBuffers },
+                primitive: {
+                    topology:  VK_TOPOLOGY[topology]    ?? 'triangle-list',
+                    cullMode:  VK_CULL_MODE[cullMode]   ?? 'none',
+                    frontFace: VK_FRONT_FACE[frontFace] ?? 'ccw',
+                },
+                depthStencil: depthFmt !== 0 ? {
+                    format:            VK_FORMAT_MAP[depthFmt] ?? 'depth32float',
+                    depthWriteEnabled: depthWrEn !== 0,
+                    depthCompare:      depthTestEn ? (VK_COMPARE_OP[depthCmp] ?? 'less') : 'always',
+                } : undefined,
+                fragment: fragMod ? {
+                    module: fragMod, entryPoint: fragEntry, targets,
+                } : undefined,
+                multisample: { count: 1 },
+            });
+        }
         this.#pipelines.set(h, { type: 'render', gpuPipeline });
         return ok();
     }
@@ -1140,6 +1253,73 @@ export class VkWebGPUPlugin {
     }
 
     // =========================================================================
+    // Dynamic-state pipeline variant cache
+    // =========================================================================
+
+    // Returns the variant cache key for the current pipeline + dynamic state.
+    #dynVariantKey() {
+        const s = this.#dynState;
+        return `${this.#boundPipeH}|${s.cullMode}|${s.frontFace}|${s.topology}|${s.depthTestEnable}|${s.depthWriteEnable}|${s.depthCompareOp}|${s.stencilTestEnable}`;
+    }
+
+    // Ensures the render pass uses the right pipeline variant for current dynamic state.
+    // Call before every draw inside a render pass.
+    #applyDynState(rp) {
+        if (!rp || !this.#dynDirty || this.#boundPipeH === null) return;
+        this.#dynDirty = false;
+        const key = this.#dynVariantKey();
+        let variant = this.#pipelineVariants.get(key);
+        if (!variant) {
+            const base = this.#pipelineCreateInfos.get(this.#boundPipeH);
+            if (base) {
+                const desc = structuredClone(base);
+                const s = this.#dynState;
+                desc.primitive.topology = VK_TOPOLOGY[s.topology] ?? desc.primitive.topology;
+                desc.primitive.cullMode = VK_CULL_MODE[s.cullMode] ?? desc.primitive.cullMode;
+                desc.primitive.frontFace = VK_FRONT_FACE[s.frontFace] ?? desc.primitive.frontFace;
+                if (desc.depthStencil) {
+                    desc.depthStencil.depthWriteEnabled = s.depthWriteEnable !== 0;
+                    desc.depthStencil.depthCompare = s.depthTestEnable
+                        ? (VK_COMPARE_OP[s.depthCompareOp] ?? desc.depthStencil.depthCompare)
+                        : 'always';
+                }
+                try {
+                    variant = this.#device.createRenderPipeline(desc);
+                    this.#pipelineVariants.set(key, variant);
+                } catch (e) {
+                    console.warn('[VkWebGPUPlugin] dynState variant failed:', e.message);
+                    variant = this.#pipelines.get(this.#boundPipeH)?.gpuPipeline;
+                }
+            }
+        }
+        if (variant) rp.setPipeline(variant);
+    }
+
+    // Returns (or lazily creates) the blit GPURenderPipeline for a given dst format.
+    #getBlitPipeline(dstFormat) {
+        let pipe = this.#blitPipelines.get(dstFormat);
+        if (!pipe && this.#blitShaderMod && this.#blitBGL) {
+            const layout = this.#device.createPipelineLayout({
+                bindGroupLayouts: [this.#blitBGL],
+            });
+            try {
+                pipe = this.#device.createRenderPipeline({
+                    label:    `blit-${dstFormat}`,
+                    layout,
+                    vertex:   { module: this.#blitShaderMod, entryPoint: 'vs_main' },
+                    fragment: { module: this.#blitShaderMod, entryPoint: 'fs_main',
+                                targets: [{ format: dstFormat }] },
+                    primitive: { topology: 'triangle-list' },
+                });
+                this.#blitPipelines.set(dstFormat, pipe);
+            } catch (e) {
+                console.warn(`[VkWebGPUPlugin] blitPipeline(${dstFormat}) failed:`, e.message);
+            }
+        }
+        return pipe ?? null;
+    }
+
+    // =========================================================================
     // QUEUE_SUBMIT — the core frame path
     // =========================================================================
 
@@ -1253,7 +1433,11 @@ export class VkWebGPUPlugin {
             const pipeH  = v.getBigUint64(4, true);
             const pi     = this.#pipelines.get(pipeH);
             if (pi?.gpuPipeline) {
-                if (bindPt === VK_BIND_GRAPHICS && rp)  rp.setPipeline(pi.gpuPipeline);
+                if (bindPt === VK_BIND_GRAPHICS && rp) {
+                    this.#boundPipeH = pipeH;
+                    this.#dynDirty   = true; // re-apply dynamic state to this new pipeline
+                    this.#applyDynState(rp);
+                }
                 if (bindPt === VK_BIND_COMPUTE  && cp)  cp.setPipeline(pi.gpuPipeline);
             }
             break;
@@ -1316,12 +1500,14 @@ export class VkWebGPUPlugin {
 
         case FC_DRAW: {
             if (!rp) break;
+            this.#applyDynState(rp);
             rp.draw(v.getUint32(0,true), v.getUint32(4,true), v.getUint32(8,true), v.getUint32(12,true));
             break;
         }
 
         case FC_DRAW_INDEXED: {
             if (!rp) break;
+            this.#applyDynState(rp);
             rp.drawIndexed(v.getUint32(0,true), v.getUint32(4,true),
                            v.getUint32(8,true), v.getInt32(12,true), v.getUint32(16,true));
             break;
@@ -1329,6 +1515,7 @@ export class VkWebGPUPlugin {
 
         case FC_DRAW_INDIRECT: {
             if (!rp) break;
+            this.#applyDynState(rp);
             const bi = this.#buffers.get(v.getBigUint64(0, true));
             if (bi?.gpuBuffer) {
                 const bOff      = Number(v.getBigUint64(8, true));
@@ -1342,6 +1529,7 @@ export class VkWebGPUPlugin {
 
         case FC_DRAW_INDEXED_INDIRECT: {
             if (!rp) break;
+            this.#applyDynState(rp);
             const bi = this.#buffers.get(v.getBigUint64(0, true));
             if (bi?.gpuBuffer) {
                 const bOff      = Number(v.getBigUint64(8, true));
@@ -1413,12 +1601,44 @@ export class VkWebGPUPlugin {
             // WebGPU synchronisation is automatic; no-op.
             break;
 
-        case FC_SET_CULL_MODE: case FC_SET_FRONT_FACE: case FC_SET_PRIMITIVE_TOPOLOGY:
-        case FC_SET_DEPTH_TEST_ENABLE: case FC_SET_DEPTH_WRITE_ENABLE:
-        case FC_SET_DEPTH_COMPARE_OP:  case FC_SET_DEPTH_BIAS_ENABLE:
-        case FC_SET_STENCIL_TEST_ENABLE: case FC_SET_STENCIL_OP:
-        case FC_SET_DEPTH_BOUNDS: case FC_SET_DEPTH_BIAS: case FC_SET_LINE_WIDTH:
-            // Extended dynamic state requires baking into pipeline in WebGPU; no-op here.
+        case FC_SET_CULL_MODE:
+            this.#dynState.cullMode = v.getUint32(0, true);
+            this.#dynDirty = true;
+            break;
+        case FC_SET_FRONT_FACE:
+            this.#dynState.frontFace = v.getUint32(0, true);
+            this.#dynDirty = true;
+            break;
+        case FC_SET_PRIMITIVE_TOPOLOGY:
+            this.#dynState.topology = v.getUint32(0, true);
+            this.#dynDirty = true;
+            break;
+        case FC_SET_DEPTH_TEST_ENABLE:
+            this.#dynState.depthTestEnable = v.getUint32(0, true);
+            this.#dynDirty = true;
+            break;
+        case FC_SET_DEPTH_WRITE_ENABLE:
+            this.#dynState.depthWriteEnable = v.getUint32(0, true);
+            this.#dynDirty = true;
+            break;
+        case FC_SET_DEPTH_COMPARE_OP:
+            this.#dynState.depthCompareOp = v.getUint32(0, true);
+            this.#dynDirty = true;
+            break;
+        case FC_SET_DEPTH_BIAS_ENABLE:
+            this.#dynState.depthBiasEnable = v.getUint32(0, true);
+            // depth bias not directly settable in WebGPU; mark dirty so variant recreates
+            this.#dynDirty = true;
+            break;
+        case FC_SET_STENCIL_TEST_ENABLE:
+            this.#dynState.stencilTestEnable = v.getUint32(0, true);
+            this.#dynDirty = true;
+            break;
+        case FC_SET_STENCIL_OP:
+        case FC_SET_DEPTH_BOUNDS:
+        case FC_SET_DEPTH_BIAS:
+        case FC_SET_LINE_WIDTH:
+            // No direct WebGPU equivalent; accepted without action.
             break;
 
         case FC_COPY_BUFFER: {
@@ -1487,11 +1707,114 @@ export class VkWebGPUPlugin {
             break;
         }
 
-        case FC_COPY_IMAGE_TO_BUFFER:
-        case FC_BLIT_IMAGE:
-        case FC_RESOLVE_IMAGE:
-            // Readback and multi-region blit/resolve — not yet implemented.
+        case FC_COPY_IMAGE_TO_BUFFER: {
+            // srcH(u64)+dstH(u64)+layout(u32)+count(u32)+[BufferImageCopy×56]
+            const srcIi = this.#images.get(v.getBigUint64(0, true));
+            const dstBi = this.#buffers.get(v.getBigUint64(8, true));
+            if (!srcIi?.texture || !dstBi?.gpuBuffer) break;
+            const count = v.getUint32(20, true);
+            for (let i = 0; i < count; i++) {
+                const b       = 24 + i * 56;
+                const bufOff  = Number(v.getBigUint64(b,      true));
+                const rowLen  = v.getUint32(b + 8,  true);
+                const imgH    = v.getUint32(b + 12, true);
+                const mipLevel= v.getUint32(b + 20, true);
+                const ox = v.getInt32(b + 32, true), oy = v.getInt32(b + 36, true), oz = v.getInt32(b + 40, true);
+                const ew = v.getUint32(b + 44, true), eh = v.getUint32(b + 48, true), ed = v.getUint32(b + 52, true);
+                const bpr = Math.ceil(Math.max(rowLen, ew) * 4 / 256) * 256;
+                try {
+                    enc.copyTextureToBuffer(
+                        { texture: srcIi.texture, mipLevel, origin: [ox, oy, oz] },
+                        { buffer: dstBi.gpuBuffer, offset: bufOff, bytesPerRow: bpr, rowsPerImage: imgH || eh },
+                        [ew, eh, Math.max(1, ed)],
+                    );
+                } catch (e) { /* size mismatch — ignore */ }
+            }
             break;
+        }
+
+        case FC_BLIT_IMAGE: {
+            // srcH(u64)+srcLayout(u32)+dstH(u64)+dstLayout(u32)+filter(u32)+count(u32)+[ImageBlit×80]
+            const srcIi = this.#images.get(v.getBigUint64(0,  true));
+            const dstIi = this.#images.get(v.getBigUint64(12, true));
+            if (!srcIi?.texture || !dstIi?.texture) break;
+            const count = v.getUint32(24, true);
+            if (rp) { rp.end(); state.renderPass = null; }
+            for (let i = 0; i < count; i++) {
+                const b = 28 + i * 80;
+                // src/dst offsets: {x,y,z}×2 for src and dst (each i32[3])
+                const sMip = v.getUint32(b + 4, true);
+                const dMip = v.getUint32(b + 44, true);
+                const sx0 = v.getInt32(b + 16, true), sy0 = v.getInt32(b + 20, true);
+                const sx1 = v.getInt32(b + 24, true), sy1 = v.getInt32(b + 28, true);
+                const dx0 = v.getInt32(b + 56, true), dy0 = v.getInt32(b + 60, true);
+                const dx1 = v.getInt32(b + 64, true), dy1 = v.getInt32(b + 68, true);
+                const srcW = Math.abs(sx1 - sx0), srcH_px = Math.abs(sy1 - sy0);
+                const dstW = Math.abs(dx1 - dx0), dstH_px = Math.abs(dy1 - dy0);
+                // Fast path: exact same region → copyTextureToTexture
+                if (srcW === dstW && srcH_px === dstH_px) {
+                    try {
+                        enc.copyTextureToTexture(
+                            { texture: srcIi.texture, mipLevel: sMip, origin: [Math.min(sx0,sx1), Math.min(sy0,sy1), 0] },
+                            { texture: dstIi.texture, mipLevel: dMip, origin: [Math.min(dx0,dx1), Math.min(dy0,dy1), 0] },
+                            [srcW, srcH_px, 1],
+                        );
+                    } catch (_) {}
+                    continue;
+                }
+                // Scaled path: render full-screen triangle sampling from src.
+                const dstFmt = dstIi.format;
+                const blitPipe = this.#getBlitPipeline(dstFmt);
+                if (!blitPipe) continue;
+                let srcView, dstView;
+                try {
+                    srcView = srcIi.texture.createView({ baseMipLevel: sMip, mipLevelCount: 1 });
+                    dstView = dstIi.texture.createView({ baseMipLevel: dMip, mipLevelCount: 1 });
+                } catch (_) { continue; }
+                const bg = this.#device.createBindGroup({
+                    layout: this.#blitBGL,
+                    entries: [
+                        { binding: 0, resource: srcView },
+                        { binding: 1, resource: this.#blitSampler },
+                    ],
+                });
+                const blitRP = enc.beginRenderPass({
+                    colorAttachments: [{ view: dstView, loadOp: 'load', storeOp: 'store' }],
+                });
+                blitRP.setPipeline(blitPipe);
+                blitRP.setBindGroup(0, bg);
+                blitRP.setViewport(Math.min(dx0,dx1), Math.min(dy0,dy1), dstW, dstH_px, 0, 1);
+                blitRP.setScissorRect(Math.max(0,Math.min(dx0,dx1)), Math.max(0,Math.min(dy0,dy1)), dstW, dstH_px);
+                blitRP.draw(3);
+                blitRP.end();
+            }
+            break;
+        }
+
+        case FC_RESOLVE_IMAGE: {
+            // srcH(u64)+srcLayout(u32)+dstH(u64)+dstLayout(u32)+count(u32)+[ImageResolve×68]
+            // WebGPU has no MSAA resolve command; fall back to copyTextureToTexture.
+            const srcIi = this.#images.get(v.getBigUint64(0, true));
+            const dstIi = this.#images.get(v.getBigUint64(12, true));
+            if (!srcIi?.texture || !dstIi?.texture) break;
+            const count = v.getUint32(24, true);
+            for (let i = 0; i < count; i++) {
+                const b    = 28 + i * 68;
+                const sMip = v.getUint32(b + 4,  true);
+                const sox  = v.getInt32(b + 16, true), soy = v.getInt32(b + 20, true), soz = v.getInt32(b + 24, true);
+                const dMip = v.getUint32(b + 32, true);
+                const dox  = v.getInt32(b + 44, true), doy = v.getInt32(b + 48, true), doz = v.getInt32(b + 52, true);
+                const ew   = v.getUint32(b + 56, true), eh = v.getUint32(b + 60, true);
+                try {
+                    enc.copyTextureToTexture(
+                        { texture: srcIi.texture, mipLevel: sMip, origin: [sox, soy, soz] },
+                        { texture: dstIi.texture, mipLevel: dMip, origin: [dox, doy, doz] },
+                        [ew, eh, 1],
+                    );
+                } catch (_) {}
+            }
+            break;
+        }
 
         case FC_CLEAR_COLOR_IMAGE: {
             // image(u64)+layout(u32)+color(ClearValue 16 bytes)+rangeCount(u32)+ranges(20×n)
@@ -1507,11 +1830,71 @@ export class VkWebGPUPlugin {
             break;
         }
 
-        case FC_CLEAR_DEPTH_STENCIL_IMAGE:
-        case FC_CLEAR_ATTACHMENTS:
-        case FC_FILL_BUFFER:
-            // No-op / not yet implemented.
+        case FC_CLEAR_DEPTH_STENCIL_IMAGE: {
+            // image(u64)+layout(u32)+clearValue{depth:f32,stencil:u32}+rangeCount(u32)+ranges
+            const ii = this.#images.get(v.getBigUint64(0, true));
+            if (!ii?.texture || rp) break; // only valid outside a render pass
+            const depthCV   = v.getFloat32(12, true);
+            const stencilCV = v.getUint32(16,  true);
+            const fmt = ii.format ?? 'depth32float';
+            const isDS = fmt.includes('stencil');
+            try {
+                const clrPass = enc.beginRenderPass({ colorAttachments: [], depthStencilAttachment: {
+                    view:              ii.texture.createView(),
+                    depthLoadOp:       'clear', depthStoreOp:   'store', depthClearValue:   depthCV,
+                    stencilLoadOp:     isDS ? 'clear' : undefined,
+                    stencilStoreOp:    isDS ? 'store' : undefined,
+                    stencilClearValue: isDS ? stencilCV : undefined,
+                }});
+                clrPass.end();
+            } catch (e) { console.warn('[VkWebGPUPlugin] clearDepthStencilImage failed:', e.message); }
             break;
+        }
+
+        case FC_CLEAR_ATTACHMENTS: {
+            // count(u32) + [ClearAttachment{aspectMask:u32, colorAttachment:u32, clearValue:16}]
+            // + rectCount(u32) + [ClearRect{rect:16, baseLayer:u32, layerCount:u32}]
+            // WebGPU cannot clear attachments mid-pass.  End the pass, clear with a new pass, restart.
+            if (!rp) break;
+            // Collect clear infos before ending the pass.
+            const count = v.getUint32(0, true);
+            let off = 4;
+            const clears = [];
+            for (let i = 0; i < count; i++) {
+                const aspect = v.getUint32(off, true); off += 4;
+                const slot   = v.getUint32(off, true); off += 4;
+                const r = v.getFloat32(off, true), g = v.getFloat32(off+4, true),
+                      b = v.getFloat32(off+8, true), a = v.getFloat32(off+12, true);
+                const depth = r, stencilV = v.getUint32(off+4, true);
+                off += 16;
+                clears.push({ aspect, slot, r, g, b, a, depth, stencilV });
+            }
+            // Re-begin the same render pass with LOAD_OP=clear for affected attachments
+            // is not feasible mid-recording in WebGPU. Best effort: log and continue.
+            console.debug('[VkWebGPUPlugin] FC_CLEAR_ATTACHMENTS: not supported mid-pass (no-op)');
+            break;
+        }
+
+        case FC_FILL_BUFFER: {
+            // dstH(u64)+dstOffset(u64)+size(u64)+data(u32)
+            const bi      = this.#buffers.get(v.getBigUint64(0, true));
+            const bOff    = Number(v.getBigUint64(8,  true));
+            const size    = Number(v.getBigUint64(16, true));
+            const fillVal = v.getUint32(24, true);
+            if (!bi?.gpuBuffer) break;
+            if (fillVal === 0) {
+                // WebGPU native clear (most common case — DXVK clears with 0).
+                enc.clearBuffer(bi.gpuBuffer, bOff, size === 0xFFFFFFFFFFFFFFFF ? undefined : size);
+            } else {
+                // Non-zero fill: build a CPU staging array and upload.
+                const byteCount = Math.min(size === 0xFFFFFFFFFFFFFFFF ? bi.gpuBuffer.size : size,
+                                           bi.gpuBuffer.size - bOff);
+                const fill32 = new Uint32Array(Math.ceil(byteCount / 4));
+                fill32.fill(fillVal);
+                this.#device.queue.writeBuffer(bi.gpuBuffer, bOff, fill32, 0, Math.ceil(byteCount / 4));
+            }
+            break;
+        }
 
         case FC_UPDATE_BUFFER: {
             // dstH(u64)+dstOffset(u64)+dataLen(u32)+data
