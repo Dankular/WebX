@@ -1,13 +1,18 @@
 #!/bin/bash
 # /opt/webx/launch.sh
 # Runs inside the Canary guest (x86-64 SteamOS).
-# Starts an X server, initialises Proton/Wine + DXVK, then launches the game.
+# Starts Proton/Wine + DXVK without requiring a real X server.
+#
+# X11 Surface Strategy:
+#   libxcb_stub.so (LD_PRELOAD) intercepts all xcb_* calls and returns
+#   fake handles.  DXVK/Wine believe they have an X11 connection and window;
+#   the vkwebx ICD ignores the xcb pointers and routes Vulkan frames to
+#   WebGPU over the x86 I/O port 0x7860 bridge.
 #
 # Canary-specific notes:
-#   1. Remove stale Xorg lock/socket from previous sessions
-#   2. Pre-create /tmp/.X11-unix — Xorg needs it to exist
-#   3. Use the fbdev driver against /dev/fb0 (Canary's virtual framebuffer)
-#   4. AutoAddDevices false — udev is not running inside Canary
+#   1. No Xorg — fbdev driver is not needed (WebGPU replaces the display path)
+#   2. SYS_FORK returns -EPERM; wineserver starts via CLONE_VM thread instead
+#   3. AF_UNIX sockets are emulated in-memory by Canary (no real kernel sockets)
 
 set -e
 
@@ -16,61 +21,29 @@ export WINEPREFIX="${WINEPREFIX:-/home/gamer/.wine}"
 export WINEARCH="${WINEARCH:-win64}"
 export WINEDEBUG="${WINEDEBUG:--all,+d3d,+vulkan}"
 
-# ── 1. Clean up any stale Xorg state from a previous session ─────────────────
-rm -f  /tmp/.X0-lock         2>/dev/null || true
-rm -f  /tmp/.X11-unix/X0     2>/dev/null || true
-rm -rf /tmp/.X11-unix         2>/dev/null || true
-
-# ── 2. Pre-create /tmp/.X11-unix with sticky bit ─────────────────────────────
-mkdir -p  /tmp/.X11-unix
-chmod 1777 /tmp/.X11-unix
-
-# ── 3. Xorg config — fbdev driver against Canary's /dev/fb0 ──────────────────
-cat > /tmp/xorg.conf <<'XORGEOF'
-Section "ServerFlags"
-    Option "AutoAddDevices"    "false"
-    Option "AutoEnableDevices" "false"
-EndSection
-
-Section "Device"
-    Identifier "Device0"
-    Driver     "fbdev"
-    Option     "fbdev" "/dev/fb0"
-EndSection
-
-Section "Screen"
-    Identifier "Screen0"
-    Device     "Device0"
-    DefaultDepth 24
-EndSection
-
-Section "ServerLayout"
-    Identifier "Layout0"
-    Screen     "Screen0"
-EndSection
-XORGEOF
-
-# ── Start X server ────────────────────────────────────────────────────────────
-echo "[webx] Starting X server..."
-Xorg :0 -noreset -config /tmp/xorg.conf -logfile /tmp/Xorg.log &
+# ── Fake display: set DISPLAY but rely on xcb stub for the connection ─────
 export DISPLAY=:0
 
-# Wait up to 10 s for the Unix socket to appear
-for i in $(seq 1 10); do
-    [ -S /tmp/.X11-unix/X0 ] && break
-    sleep 1
-done
-
-if [ ! -S /tmp/.X11-unix/X0 ]; then
-    echo "[webx] ERROR: X server did not start — Xorg log:"
-    cat /tmp/Xorg.log 2>/dev/null || echo "(no log)"
-    exit 1
+# ── LD_PRELOAD libxcb_stub.so before any Wine/DXVK code loads xcb ─────────
+XCBSTUB=/usr/local/lib/libxcb_stub.so
+if [ -f "$XCBSTUB" ]; then
+    export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$XCBSTUB"
+    echo "[webx] xcb stub loaded: $XCBSTUB"
+else
+    echo "[webx] WARNING: xcb stub not found at $XCBSTUB — X11 connection will fail"
 fi
-echo "[webx] X server ready"
+
+# ── Create /tmp/.X11-unix so Wine/xcb don't abort on missing directory ────
+mkdir -p  /tmp/.X11-unix
+chmod 1777 /tmp/.X11-unix
+# Create a dummy socket placeholder so Wine's socket-existence checks pass.
+# The xcb stub intercepts xcb_connect() before it opens the socket, so
+# we just need the path to exist as a regular file.
+touch /tmp/.X11-unix/X0 2>/dev/null || true
 
 echo "[webx] Vulkan ICD: $VK_DRIVER_FILES"
 
-# ── Wine prefix initialisation (first run only) ───────────────────────────────
+# ── Wine prefix initialisation (first run only) ───────────────────────────
 if [ ! -f "$WINEPREFIX/.webx_initialized" ]; then
     echo "[webx] Initializing Wine prefix (first run, WINEARCH=$WINEARCH)..."
     wine wineboot --init >/tmp/wineboot.log 2>&1 || true

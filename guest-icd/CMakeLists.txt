@@ -41,3 +41,17 @@ target_link_libraries(vkwebx PRIVATE pthread)
 
 install(TARGETS vkwebx LIBRARY DESTINATION /usr/local/lib)
 install(FILES vkwebx_icd.json DESTINATION /etc/vulkan/icd.d)
+
+# ── libxcb_stub.so — fake XCB for DXVK/Wine (LD_PRELOAD) ──────────────────
+#
+# Stubs all xcb_* functions so DXVK and Wine can create "windows" without a
+# real X server running.  The vkwebx ICD ignores the xcb connection/window
+# pointers entirely, so fake handles are sufficient.
+#
+add_library(xcb_stub SHARED src/xcb_stub.c)
+set_target_properties(xcb_stub PROPERTIES
+    OUTPUT_NAME "xcb_stub"
+    C_VISIBILITY_PRESET default   # all symbols must be visible for LD_PRELOAD
+)
+target_compile_options(xcb_stub PRIVATE -Wall -Wextra)
+install(TARGETS xcb_stub LIBRARY DESTINATION /usr/local/lib)

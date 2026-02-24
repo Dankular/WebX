@@ -51,6 +51,12 @@ echo "[webx] Installing libvkwebx.so..."
 sudo install -m 755 "$REPO_ROOT/build/guest-icd/libvkwebx.so" \
     "$MOUNT/usr/local/lib/libvkwebx.so"
 
+if [ -f "$REPO_ROOT/build/guest-icd/libxcb_stub.so" ]; then
+    echo "[webx] Installing libxcb_stub.so..."
+    sudo install -m 755 "$REPO_ROOT/build/guest-icd/libxcb_stub.so" \
+        "$MOUNT/usr/local/lib/libxcb_stub.so"
+fi
+
 echo "[webx] Installing vkwebx_icd.json..."
 sudo mkdir -p "$MOUNT/etc/vulkan/icd.d"
 sudo install -m 644 "$REPO_ROOT/guest-icd/vkwebx_icd.json" \
