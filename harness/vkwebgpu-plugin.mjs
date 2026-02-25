@@ -86,6 +86,7 @@ const FC_SET_STENCIL_TEST_ENABLE = 0x00AA;
 const FC_SET_STENCIL_OP          = 0x00AB;
 const FC_SET_DEPTH_BOUNDS        = 0x00AC;
 const FC_DISPATCH_BASE           = 0x00AD;
+const FC_DISPATCH_INDIRECT       = 0x008F;
 
 // ── VkFormat → GPUTextureFormat ───────────────────────────────────────────────
 // Keyed by raw VkFormat enum values (vulkan_core.h).
@@ -324,6 +325,8 @@ export class VkWebGPUPlugin {
     #descPools       = new Map(); // handle → {}
     #descSets        = new Map(); // handle → { layoutHandle, gpuBindGroup }
     #samplers        = new Map(); // handle → GPUSampler
+    #cmdBuffers      = new Map(); // handle(bigint) → Uint8Array[] recorded ops
+    #surfaces        = new Map(); // handle(bigint) → { inst }
 
     // ── Swapchain state ───────────────────────────────────────────────────────
     #swapImages      = [];        // GPUTexture[] for each swapchain image
@@ -487,10 +490,12 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
             case 0x0063: return ok();
             case 0x0064: return this.#allocateDescriptorSets(v, payload);
             case 0x0065: return this.#updateDescriptorSets(v, payload);
-            // Command pool / buffer (recording is in guest; host just acks)
+            // Command pool / buffer
             case 0x0070: case 0x0071: case 0x0072:
-            case 0x0073: case 0x0074: case 0x0075:
-            case 0x0076: case 0x0077: return ok();
+            case 0x0073: case 0x0074: return ok();         // pool create/destroy, alloc, free, reset
+            case 0x0075: return this.#beginCommandBuffer(v);
+            case 0x0076: return this.#endCommandBuffer(v);
+            case 0x0077: return this.#resetCommandBuffer(v);
             // Queue submission
             case 0x00B0: return this.#queueSubmit(v, payload);
             case 0x00B1: return ok();
@@ -500,7 +505,13 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
             case 0x00B8: return ok();
             // Extension enumeration
             case 0x00C0: case 0x00C1: case 0x00C2: return ok();
+            // Surface commands (hardcoded in guest ICD, not in enum)
+            case 0x00C3: return this.#createSurface(v);
+            case 0x00C4: return ok(); // destroySurface
+            case 0x00C5: return this.#getSurfaceCaps();
             default:
+                // Recording commands (0x0080–0x00AF) arrive here during CB recording
+                if (cmd >= 0x0080 && cmd <= 0x00AF) return this.#recordCmd(cmd, payload);
                 console.warn(`[VkWebGPUPlugin] unknown cmd=0x${cmd.toString(16).padStart(4,'0')}`);
                 return ok();
         }
@@ -610,10 +621,12 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     // =========================================================================
 
     #createSwapchain(v) {
-        const width      = v.getUint32(0,  true);
-        const height     = v.getUint32(4,  true);
-        const imageCount = v.getUint32(8,  true);
-        const vkFormat   = v.getUint32(12, true);
+        // C: dev@0(u64) + h@8(u64) + surface@16(u64) + minImageCount@24(u32)
+        //    + imageFormat@28(u32) + colorSpace@32(u32) + width@36(u32) + height@40(u32) + ...
+        const imageCount = v.getUint32(24, true);
+        const vkFormat   = v.getUint32(28, true);
+        const width      = v.getUint32(36, true);
+        const height     = v.getUint32(40, true);
         this.#swapFormat = VK_FORMAT_MAP[vkFormat] ?? this.#canvasFormat;
 
         for (const t of this.#swapImages) t.destroy();
@@ -707,10 +720,10 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     // =========================================================================
 
     #allocateMemory(v) {
-        // payload: handle(u64@0) + size(u64@8) + memTypeIndex(u32@16)
-        const h       = v.getBigUint64(0, true);
-        const size    = v.getBigUint64(8, true);
-        const memType = v.getUint32(16, true);
+        // C: dev(u64@0) + handle(u64@8) + size(u64@16) + memTypeIndex(u32@24)
+        const h       = v.getBigUint64(8,  true);
+        const size    = v.getBigUint64(16, true);
+        const memType = v.getUint32(24,   true);
         this.#memories.set(h, { size, memType });
         return ok();
     }
@@ -736,10 +749,10 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     // =========================================================================
 
     #createBuffer(v) {
-        // payload: handle(u64@0) + size(u64@8) + vkUsage(u32@16)
-        const h       = v.getBigUint64(0, true);
-        const size    = v.getBigUint64(8, true);
-        const vkUsage = v.getUint32(16, true);
+        // C: dev(u64@0) + handle(u64@8) + size(u64@16) + vkUsage(u32@24) + sharingMode(u32@28)
+        const h       = v.getBigUint64(8,  true);
+        const size    = v.getBigUint64(16, true);
+        const vkUsage = v.getUint32(24,   true);
         // Align size to 4 bytes as required by WebGPU.
         const alignedSize = Number((size + 3n) & ~3n);
         let gpuBuffer = null;
@@ -764,14 +777,16 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     // =========================================================================
 
     #createImage(v) {
-        // payload: handle(u64@0)+width(u32@8)+height(u32@12)+depth(u32@16)+vkFmt(u32@20)+vkUsage(u32@24)+mipLevels(u32@28)
-        const h       = v.getBigUint64(0,  true);
-        const width   = v.getUint32(8,  true);
-        const height  = v.getUint32(12, true);
-        const depth   = v.getUint32(16, true);
+        // C: dev(u64@0)+handle(u64@8)+imageType(u32@16)+format(u32@20)+width(u32@24)+height(u32@28)
+        //    +depth(u32@32)+mipLevels(u32@36)+arrayLayers(u32@40)+samples(u32@44)+tiling(u32@48)
+        //    +usage(u32@52)+initialLayout(u32@56)+flags(u32@60)
+        const h       = v.getBigUint64(8,  true);
         const vkFmt   = v.getUint32(20, true);
-        const vkUsage = v.getUint32(24, true);
-        const mips    = v.getUint32(28, true);
+        const width   = v.getUint32(24, true);
+        const height  = v.getUint32(28, true);
+        const depth   = v.getUint32(32, true);
+        const mips    = v.getUint32(36, true);
+        const vkUsage = v.getUint32(52, true);
         const format  = VK_FORMAT_MAP[vkFmt] ?? 'rgba8unorm';
         let texture   = null;
         try {
@@ -796,15 +811,17 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     }
 
     #createImageView(v) {
-        // payload: handle(u64@0)+imageHandle(u64@8)+vkFmt(u32@16)+aspectMask(u32@20)+baseMip(u32@24)+levelCount(u32@28)+baseLayer(u32@32)+layerCount(u32@36)
-        const h          = v.getBigUint64(0,  true);
-        const imgH       = v.getBigUint64(8,  true);
-        const vkFmt      = v.getUint32(16, true);
-        const aspectMask = v.getUint32(20, true);
-        const baseMip    = v.getUint32(24, true);
-        const levelCount = v.getUint32(28, true);
-        const baseLayer  = v.getUint32(32, true);
-        const layerCount = v.getUint32(36, true);
+        // C: dev(u64@0)+handle(u64@8)+image(u64@16)+viewType(u32@24)+format(u32@28)
+        //    +components{r,g,b,a}(u32×4 @32-44)+aspectMask(u32@48)+baseMip(u32@52)
+        //    +levelCount(u32@56)+baseLayer(u32@60)+layerCount(u32@64)
+        const h          = v.getBigUint64(8,  true);
+        const imgH       = v.getBigUint64(16, true);
+        const vkFmt      = v.getUint32(28, true);
+        const aspectMask = v.getUint32(48, true);
+        const baseMip    = v.getUint32(52, true);
+        const levelCount = v.getUint32(56, true);
+        const baseLayer  = v.getUint32(60, true);
+        const layerCount = v.getUint32(64, true);
         const ii         = this.#images.get(imgH);
         const format     = VK_FORMAT_MAP[vkFmt] ?? (ii?.format ?? 'rgba8unorm');
         const aspect     = vkAspect(aspectMask);
@@ -837,18 +854,18 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     // =========================================================================
 
     #createSampler(v) {
-        // payload: handle(u64@0)+magFilter(u32@8)+minFilter(u32@12)+mipmapMode(u32@16)
-        //          +addrU(u32@20)+addrV(u32@24)+addrW(u32@28)+mipLodBias(f32@32)
-        //          +anisotropyEnable(u32@36)+maxAnisotropy(f32@40)
-        const h       = v.getBigUint64(0,  true);
-        const magF    = v.getUint32(8,  true);
-        const minF    = v.getUint32(12, true);
-        const mipM    = v.getUint32(16, true);
-        const adU     = v.getUint32(20, true);
-        const adV     = v.getUint32(24, true);
-        const adW     = v.getUint32(28, true);
-        const anisoEn = v.getUint32(36, true);
-        const maxAniso= v.getFloat32(40, true);
+        // C: dev(u64@0)+handle(u64@8)+magFilter(u32@16)+minFilter(u32@20)+mipmapMode(u32@24)
+        //    +addrU(u32@28)+addrV(u32@32)+addrW(u32@36)+mipLodBias(f32@40)
+        //    +anisotropyEnable(u32@44)+maxAnisotropy(f32@48)
+        const h       = v.getBigUint64(8,  true);
+        const magF    = v.getUint32(16, true);
+        const minF    = v.getUint32(20, true);
+        const mipM    = v.getUint32(24, true);
+        const adU     = v.getUint32(28, true);
+        const adV     = v.getUint32(32, true);
+        const adW     = v.getUint32(36, true);
+        const anisoEn = v.getUint32(44, true);
+        const maxAniso= v.getFloat32(48, true);
         const sampler = this.#device.createSampler({
             magFilter:    VK_FILTER[magF]    ?? 'linear',
             minFilter:    VK_FILTER[minF]    ?? 'linear',
@@ -872,18 +889,23 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     // =========================================================================
 
     #createShaderModule(v, payload) {
-        // payload: handle(u64@0) + wgslLen(u32@8) + wgsl[@12]
-        // (Rust guest already translated SPIRV→WGSL via naga)
-        const h       = v.getBigUint64(0, true);
-        const wgslLen = v.getUint32(8, true);
-        const wgsl    = new TextDecoder().decode(payload.subarray(12, 12 + wgslLen));
-        let gpuModule = null;
-        try {
-            gpuModule = this.#device.createShaderModule({ code: wgsl, label: `sm_${h}` });
-        } catch (e) {
-            console.warn(`[VkWebGPUPlugin] createShaderModule (h=${h}) failed:`, e.message, '\nWGSL:\n', wgsl.slice(0, 300));
+        // C: dev(u64@0) + handle(u64@8) + codeSize(u32@16) + SPIR-V bytes@20
+        const h        = v.getBigUint64(8,  true);
+        const codeSize = v.getUint32(16, true);
+        const spirv    = payload.slice(20, 20 + codeSize);
+        let gpuModule  = null;
+        // Attempt SPIR-V→WGSL translation via naga-bridge if loaded.
+        if (typeof globalThis.spirvToWgsl === 'function') {
+            try {
+                const wgsl = globalThis.spirvToWgsl(spirv);
+                gpuModule = this.#device.createShaderModule({ code: wgsl, label: `sm_${h}` });
+            } catch (e) {
+                console.warn(`[VkWebGPUPlugin] createShaderModule spirv→wgsl failed (h=${h}):`, e.message);
+            }
+        } else {
+            console.warn(`[VkWebGPUPlugin] createShaderModule (h=${h}): no spirvToWgsl translator — shader deferred`);
         }
-        this.#shaderModules.set(h, { gpuModule });
+        this.#shaderModules.set(h, { spirv, gpuModule });
         return ok();
     }
 
@@ -897,12 +919,14 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     // =========================================================================
 
     #createPipelineLayout(v, payload) {
-        // payload: handle(u64@0) + hasPush(u32@8) + setCount(u32@12) + setLayouts[@16](each u64)
-        const h          = v.getBigUint64(0,  true);
-        const hasPush    = v.getUint32(8,  true) !== 0;
-        const setCount   = v.getUint32(12, true);
+        // C: dev(u64@0)+handle(u64@8)+setLayoutCount(u32@16)+setLayouts(u64×n @20)
+        //    +pushConstantRangeCount(u32 @20+n*8)+pushRanges(VkPushConstantRange×m raw)
+        const h          = v.getBigUint64(8,  true);
+        const setCount   = v.getUint32(16, true);
         const setLayouts = [];
-        for (let i = 0; i < setCount; i++) setLayouts.push(v.getBigUint64(16 + i * 8, true));
+        for (let i = 0; i < setCount; i++) setLayouts.push(v.getBigUint64(20 + i * 8, true));
+        const pushRangeCount = v.getUint32(20 + setCount * 8, true);
+        const hasPush    = pushRangeCount > 0;
 
         // Build GPUPipelineLayout: if hasPush, prepend push-constant BGL at slot 0.
         const bgls = [];
@@ -928,36 +952,61 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     // =========================================================================
 
     #createRenderPass(v, payload) {
-        // payload: handle(u64@0) + attachCount(u32@8) + per attachment: vkFormat(u32)+loadOp(u32)+storeOp(u32)+isDepth(u32)
-        const h           = v.getBigUint64(0, true);
-        const attachCount = v.getUint32(8, true);
+        // C: dev(u64@0)+handle(u64@8)+attachCount(u32@16)+VkAttachmentDescription×n(36B each)@20
+        //    then subpassCount(u32), per subpass: bindPoint(u32)+inputCount(u32)+VkAttachmentReference×(8B each)
+        //    +colorCount(u32)+VkAttachmentReference×(8B each)+has_ds(u32)[+VkAttachmentReference(8B)]
+        //    then dependencyCount(u32)+VkSubpassDependency×(28B each)
+        // VkAttachmentDescription (36B): flags@0+format@4+samples@8+loadOp@12+storeOp@16+
+        //   stencilLoadOp@20+stencilStoreOp@24+initialLayout@28+finalLayout@32
+        const DEPTH_FORMATS = new Set([124,125,126,127,128,129,130]); // VK_FORMAT_D* range
+        const h           = v.getBigUint64(8,  true);
+        const attachCount = v.getUint32(16, true);
         const attachments = [];
         for (let i = 0; i < attachCount; i++) {
-            const base   = 12 + i * 16;
-            const vkFmt  = v.getUint32(base,      true);
-            const loadOp = v.getUint32(base + 4,  true);
-            const storeOp= v.getUint32(base + 8,  true);
-            const isDepth= v.getUint32(base + 12, true);
+            const base    = 20 + i * 36;
+            const vkFmt   = v.getUint32(base + 4,  true);
+            const loadOp  = v.getUint32(base + 12, true);
+            const storeOp = v.getUint32(base + 16, true);
             attachments.push({
                 format:  VK_FORMAT_MAP[vkFmt] ?? 'rgba8unorm',
                 loadOp:  VK_LOAD_OP[loadOp]   ?? 'load',
                 storeOp: VK_STORE_OP[storeOp] ?? 'store',
-                isDepth: isDepth !== 0,
+                isDepth: DEPTH_FORMATS.has(vkFmt),
+                vkFmt,
             });
         }
-        this.#renderPasses.set(h, { attachments });
+        // Parse subpasses to record which attachments each subpass uses.
+        let off = 20 + attachCount * 36;
+        const subpassCount = v.getUint32(off, true); off += 4;
+        const subpasses = [];
+        for (let s = 0; s < subpassCount; s++) {
+            off += 4; // pipelineBindPoint
+            const inputCount = v.getUint32(off, true); off += 4;
+            off += inputCount * 8; // VkAttachmentReference each 8B
+            const colorCount = v.getUint32(off, true); off += 4;
+            const colorAttachments = [];
+            for (let c = 0; c < colorCount; c++) {
+                colorAttachments.push(v.getUint32(off, true)); off += 8; // attachment idx + layout
+            }
+            const has_ds = v.getUint32(off, true); off += 4;
+            let depthAttachment = null;
+            if (has_ds) { depthAttachment = v.getUint32(off, true); off += 8; }
+            subpasses.push({ colorAttachments, depthAttachment });
+        }
+        this.#renderPasses.set(h, { attachments, subpasses });
         return ok();
     }
 
     #createFramebuffer(v, payload) {
-        // payload: handle(u64@0) + rpHandle(u64@8) + width(u32@16) + height(u32@20) + viewCount(u32@24) + views[](u64@28)
-        const h         = v.getBigUint64(0,  true);
-        const rpHandle  = v.getBigUint64(8,  true);
-        const width     = v.getUint32(16, true);
-        const height    = v.getUint32(20, true);
+        // C: dev(u64@0)+handle(u64@8)+renderPass(u64@16)+attachmentCount(u32@24)
+        //    +pAttachments[](u64×n @28)+width(u32@28+n*8)+height(u32@32+n*8)+layers(u32@36+n*8)
+        const h         = v.getBigUint64(8,  true);
+        const rpHandle  = v.getBigUint64(16, true);
         const viewCount = v.getUint32(24, true);
         const views     = [];
         for (let i = 0; i < viewCount; i++) views.push(v.getBigUint64(28 + i * 8, true));
+        const width     = v.getUint32(28 + viewCount * 8,     true);
+        const height    = v.getUint32(28 + viewCount * 8 + 4, true);
         this.#framebuffers.set(h, { rpHandle, width, height, views });
         return ok();
     }
@@ -967,72 +1016,116 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     // =========================================================================
 
     #createGraphicsPipeline(v, payload) {
-        // Serialization format (from serialize_and_send_graphics_pipeline in pipeline.rs):
-        //   handle(u64) + layoutHandle(u64) + stageCount(u32)
-        //   stages[] × { stageFlags(u32) + moduleHandle(u64) + entryLen(u32) + entry[entryLen] }
-        //   colorFmtCount(u32) + colorFmts[](u32) + depthFmt(u32)
-        //   vtxBindCount(u32) + vtxBindings[] × { binding+stride+rate(u32×3) + attrCount(u32) + attrs[] × { loc+bind+fmt+off(u32×4) } }
-        //   topology(u32) + polygonMode(u32) + cullMode(u32) + frontFace(u32)
-        //   depthTestEn(u32) + depthWriteEn(u32) + depthCompareOp(u32)
-        //   blendCount(u32) + blends[] × { enable+srcCol+dstCol+colOp+srcAlpha+dstAlpha+alphaOp+writeMask(u32×8) }
+        // C: dev(u64@0)+handle(u64@8)+type=0(u32@16)+layout(u64@20)+renderPass(u64@28)+subpass(u32@36)
+        //    +stageCount(u32@40)+stages[stageCount × {stage(u32)+module(u64)+nameLen(u32)+name[nameLen]}]
+        //    +vtxBindCount(u32)+VkVertexInputBindingDescription×(12B each)
+        //    +vtxAttrCount(u32)+VkVertexInputAttributeDescription×(16B each)
+        //    +topology(u32)+primitiveRestartEnable(u32)
+        //    +VkPipelineRasterizationStateCreateInfo raw (64B, sizeof on x86-64)
+        //    +VkPipelineDepthStencilStateCreateInfo raw (104B, sizeof on x86-64)
+        //    +blendAttachCount(u32)+VkPipelineColorBlendAttachmentState×(32B each)
+        const RAST_SIZE  = 64;  // sizeof(VkPipelineRasterizationStateCreateInfo) on x86-64
+        const DS_SIZE    = 104; // sizeof(VkPipelineDepthStencilStateCreateInfo)
+        const BLEND_SIZE = 32;  // sizeof(VkPipelineColorBlendAttachmentState)
+        // Offsets within VkPipelineRasterizationStateCreateInfo:
+        //   polygonMode@28, cullMode@32, frontFace@36, depthBiasEnable@40
+        // Offsets within VkPipelineDepthStencilStateCreateInfo:
+        //   depthTestEnable@20, depthWriteEnable@24, depthCompareOp@28, stencilTestEnable@36
+        // Offsets within VkPipelineColorBlendAttachmentState:
+        //   blendEnable@0, srcColor@4, dstColor@8, colorOp@12, srcAlpha@16, dstAlpha@20, alphaOp@24, writeMask@28
+
         let off = 0;
+        off += 8; // dev
         const h       = v.getBigUint64(off, true); off += 8;
+        off += 4; // type=0 (graphics)
         const layoutH = v.getBigUint64(off, true); off += 8;
+        const rpH     = v.getBigUint64(off, true); off += 8;
+        const subpass = v.getUint32(off, true);    off += 4;
 
         const stageCount = v.getUint32(off, true); off += 4;
         const stages = [];
         for (let i = 0; i < stageCount; i++) {
-            const stageFlags = v.getUint32(off, true); off += 4;
-            const moduleH    = v.getBigUint64(off, true); off += 8;
-            const entryLen   = v.getUint32(off, true); off += 4;
-            const entry      = new TextDecoder().decode(payload.subarray(off, off + entryLen)); off += entryLen;
-            stages.push({ stageFlags, moduleH, entry: entry || 'main' });
+            const stageFlags = v.getUint32(off, true);      off += 4;
+            const moduleH    = v.getBigUint64(off, true);   off += 8;
+            const nameLen    = v.getUint32(off, true);      off += 4;
+            // name includes null terminator; strip it
+            const raw  = new TextDecoder().decode(payload.subarray(off, off + nameLen));
+            const entry = raw.replace(/\0/g, '') || 'main';
+            off += nameLen;
+            stages.push({ stageFlags, moduleH, entry });
         }
 
-        const colorFmtCount = v.getUint32(off, true); off += 4;
-        const colorFmts = [];
-        for (let i = 0; i < colorFmtCount; i++) { colorFmts.push(v.getUint32(off, true)); off += 4; }
-        const depthFmt = v.getUint32(off, true); off += 4;
-
+        // Vertex input: VkVertexInputBindingDescription (12B): binding(u32)+stride(u32)+inputRate(u32)
         const vtxBindCount = v.getUint32(off, true); off += 4;
-        const vtxBuffers = [];
+        const bindingDescs = [];
         for (let i = 0; i < vtxBindCount; i++) {
-            /*const binding =*/ v.getUint32(off, true); off += 4;
+            const binding   = v.getUint32(off, true); off += 4;
             const stride    = v.getUint32(off, true); off += 4;
-            const rate      = v.getUint32(off, true); off += 4; // 0=vertex,1=instance
-            const attrCount = v.getUint32(off, true); off += 4;
-            const attrs = [];
-            for (let j = 0; j < attrCount; j++) {
-                const loc  = v.getUint32(off, true); off += 4;
-                /*bind*/     v.getUint32(off, true); off += 4;
-                const fmt  = v.getUint32(off, true); off += 4;
-                const aoff = v.getUint32(off, true); off += 4;
-                attrs.push({ shaderLocation: loc, offset: aoff, format: VK_VERTEX_FORMAT[fmt] ?? 'float32x4' });
-            }
-            vtxBuffers.push({ arrayStride: stride, stepMode: rate === 1 ? 'instance' : 'vertex', attributes: attrs });
+            const inputRate = v.getUint32(off, true); off += 4;
+            bindingDescs.push({ binding, stride, inputRate });
         }
+        // VkVertexInputAttributeDescription (16B): location(u32)+binding(u32)+format(u32)+offset(u32)
+        const vtxAttrCount = v.getUint32(off, true); off += 4;
+        const attrDescs = [];
+        for (let i = 0; i < vtxAttrCount; i++) {
+            const loc  = v.getUint32(off, true); off += 4;
+            const bind = v.getUint32(off, true); off += 4;
+            const fmt  = v.getUint32(off, true); off += 4;
+            const aoff = v.getUint32(off, true); off += 4;
+            attrDescs.push({ shaderLocation: loc, binding: bind, offset: aoff, format: VK_VERTEX_FORMAT[fmt] ?? 'float32x4' });
+        }
+        // Build per-binding vtxBuffers for WebGPU
+        const vtxBuffers = bindingDescs.map(bd => ({
+            arrayStride: bd.stride,
+            stepMode:    bd.inputRate === 1 ? 'instance' : 'vertex',
+            attributes:  attrDescs.filter(a => a.binding === bd.binding)
+                                   .map(a => ({ shaderLocation: a.shaderLocation, offset: a.offset, format: a.format })),
+        }));
 
-        const topology    = v.getUint32(off, true); off += 4;
-        /*polygonMode*/     v.getUint32(off, true); off += 4;
-        const cullMode    = v.getUint32(off, true); off += 4;
-        const frontFace   = v.getUint32(off, true); off += 4;
-        const depthTestEn = v.getUint32(off, true); off += 4;
-        const depthWrEn   = v.getUint32(off, true); off += 4;
-        const depthCmp    = v.getUint32(off, true); off += 4;
+        // Input assembly
+        const topology              = v.getUint32(off, true); off += 4;
+        /*primitiveRestartEnable*/    v.getUint32(off, true); off += 4;
 
+        // Rasterization raw struct (64 bytes)
+        const rastBase    = off; off += RAST_SIZE;
+        const polygonMode = v.getUint32(rastBase + 28, true);
+        const cullMode    = v.getUint32(rastBase + 32, true);
+        const frontFace   = v.getUint32(rastBase + 36, true);
+
+        // Depth-stencil raw struct (104 bytes, always present — zeroed if no DS state)
+        const dsBase      = off; off += DS_SIZE;
+        const depthTestEn = v.getUint32(dsBase + 20, true);
+        const depthWrEn   = v.getUint32(dsBase + 24, true);
+        const depthCmp    = v.getUint32(dsBase + 28, true);
+
+        // Color blend attachments
         const blendCount = v.getUint32(off, true); off += 4;
+
+        // Derive color/depth formats from the render pass + subpass
+        const rpInfo     = this.#renderPasses.get(rpH);
+        const subpInfo   = rpInfo?.subpasses?.[subpass];
+        const colorFmts  = subpInfo
+            ? subpInfo.colorAttachments.map(idx => rpInfo.attachments[idx]?.format ?? 'rgba8unorm')
+            : [];
+        const depthAttIdx = subpInfo?.depthAttachment;
+        const depthFmt    = (depthAttIdx != null && rpInfo)
+            ? (rpInfo.attachments[depthAttIdx]?.format ?? null)
+            : null;
+
+        // Build blend targets
         const targets = [];
         for (let i = 0; i < blendCount; i++) {
-            const enable   = v.getUint32(off, true); off += 4;
-            const srcCol   = v.getUint32(off, true); off += 4;
-            const dstCol   = v.getUint32(off, true); off += 4;
-            const colOp    = v.getUint32(off, true); off += 4;
-            const srcAlpha = v.getUint32(off, true); off += 4;
-            const dstAlpha = v.getUint32(off, true); off += 4;
-            const alphaOp  = v.getUint32(off, true); off += 4;
-            const wmask    = v.getUint32(off, true); off += 4;
+            const base     = off + i * BLEND_SIZE;
+            const enable   = v.getUint32(base,      true);
+            const srcCol   = v.getUint32(base + 4,  true);
+            const dstCol   = v.getUint32(base + 8,  true);
+            const colOp    = v.getUint32(base + 12, true);
+            const srcAlpha = v.getUint32(base + 16, true);
+            const dstAlpha = v.getUint32(base + 20, true);
+            const alphaOp  = v.getUint32(base + 24, true);
+            const wmask    = v.getUint32(base + 28, true);
             targets.push({
-                format:    VK_FORMAT_MAP[colorFmts[i]] ?? 'rgba8unorm',
+                format:    colorFmts[i] ?? 'rgba8unorm',
                 writeMask: wmask & 0xF,
                 blend:     enable ? {
                     color: { srcFactor: VK_BLEND_FACTOR[srcCol]   ?? 'one',  dstFactor: VK_BLEND_FACTOR[dstCol]   ?? 'zero', operation: VK_BLEND_OP[colOp]   ?? 'add' },
@@ -1040,9 +1133,10 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
                 } : undefined,
             });
         }
-        // If no blend attachments were specified but we have color formats, add unblended targets.
+        off += blendCount * BLEND_SIZE;
+        // If no blend attachments, add one unblended target per color format
         if (targets.length === 0) {
-            for (const fmt of colorFmts) targets.push({ format: VK_FORMAT_MAP[fmt] ?? 'rgba8unorm', writeMask: 0xF });
+            for (const fmt of colorFmts) targets.push({ format: fmt, writeMask: 0xF });
         }
 
         // Locate vertex/fragment GPU shader modules.
@@ -1069,8 +1163,8 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
                         cullMode:  VK_CULL_MODE[cullMode]    ?? 'none',
                         frontFace: VK_FRONT_FACE[frontFace]  ?? 'ccw',
                     },
-                    depthStencil: depthFmt !== 0 ? {
-                        format:             VK_FORMAT_MAP[depthFmt] ?? 'depth32float',
+                    depthStencil: depthFmt !== null ? {
+                        format:             depthFmt,
                         depthWriteEnabled:  depthWrEn !== 0,
                         depthCompare:       depthTestEn ? (VK_COMPARE_OP[depthCmp] ?? 'less') : 'always',
                     } : undefined,
@@ -1097,8 +1191,8 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
                     cullMode:  VK_CULL_MODE[cullMode]   ?? 'none',
                     frontFace: VK_FRONT_FACE[frontFace] ?? 'ccw',
                 },
-                depthStencil: depthFmt !== 0 ? {
-                    format:            VK_FORMAT_MAP[depthFmt] ?? 'depth32float',
+                depthStencil: depthFmt !== null ? {
+                    format:            depthFmt,
                     depthWriteEnabled: depthWrEn !== 0,
                     depthCompare:      depthTestEn ? (VK_COMPARE_OP[depthCmp] ?? 'less') : 'always',
                 } : undefined,
@@ -1113,12 +1207,13 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     }
 
     #createComputePipeline(v, payload) {
-        // payload: handle(u64@0) + layoutHandle(u64@8) + moduleHandle(u64@16) + entryLen(u32@24) + entry[@28]
-        const h       = v.getBigUint64(0,  true);
-        const layoutH = v.getBigUint64(8,  true);
-        const moduleH = v.getBigUint64(16, true);
-        const entryLen= v.getUint32(24, true);
-        const entry   = new TextDecoder().decode(payload.subarray(28, 28 + entryLen)) || 'main';
+        // C: dev(u64@0)+handle(u64@8)+type=1(u32@16)+layout(u64@20)+stage(u32@28)+module(u64@32)+nameLen(u32@40)+name@44
+        const h       = v.getBigUint64(8,  true);
+        const layoutH = v.getBigUint64(20, true);
+        const moduleH = v.getBigUint64(32, true);
+        const entryLen= v.getUint32(40, true);
+        const raw     = new TextDecoder().decode(payload.subarray(44, 44 + entryLen));
+        const entry   = raw.replace(/\0/g, '') || 'main';
         const plData  = this.#pipelineLayouts.get(layoutH);
         const smData  = this.#shaderModules.get(moduleH);
         let gpuPipeline = null;
@@ -1147,25 +1242,27 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     // =========================================================================
 
     #createDescriptorSetLayout(v, payload) {
-        // payload: handle(u64@0) + bindingCount(u32@8) + bindings[@12]
-        // each binding: binding(u32)+dtype(u32)+count(u32)+stages(u32)+cisCompanion(u32) = 20 bytes
-        const h            = v.getBigUint64(0, true);
-        const bindingCount = v.getUint32(8, true);
+        // C: dev(u64@0)+handle(u64@8)+bindingCount(u32@16)+VkDescriptorSetLayoutBinding×n(24B each)@20
+        // VkDescriptorSetLayoutBinding (24B): binding(u32@0)+descriptorType(u32@4)+descriptorCount(u32@8)
+        //   +stageFlags(u32@12)+pImmutableSamplers(ptr@16 — ignored)
+        const h            = v.getBigUint64(8,  true);
+        const bindingCount = v.getUint32(16, true);
         const bindings     = [];
         const entries      = [];
         for (let i = 0; i < bindingCount; i++) {
-            const base         = 12 + i * 20;
-            const binding      = v.getUint32(base,      true);
-            const dtype        = v.getUint32(base + 4,  true);
-            const count        = v.getUint32(base + 8,  true);
-            const stages       = v.getUint32(base + 12, true);
-            const cisCompanion = v.getUint32(base + 16, true);
-            const vis          = vkShaderStages(stages);
-            bindings.push({ binding, dtype, count, stages, cisCompanion });
+            const base    = 20 + i * 24;
+            const binding = v.getUint32(base,      true);
+            const dtype   = v.getUint32(base + 4,  true);
+            const count   = v.getUint32(base + 8,  true);
+            const stages  = v.getUint32(base + 12, true);
+            const vis     = vkShaderStages(stages);
+            bindings.push({ binding, dtype, count, stages });
             entries.push(vkBglEntry(binding, dtype, count, vis));
-            // For COMBINED_IMAGE_SAMPLER (dtype=1), add companion sampler entry.
-            if (dtype === 1 && cisCompanion !== 0xFFFFFFFF) {
-                entries.push({ binding: cisCompanion, visibility: vis, sampler: { type: 'filtering' } });
+            // COMBINED_IMAGE_SAMPLER needs a companion sampler entry at binding+1 heuristic
+            if (dtype === 1) {
+                const samplerBinding = binding + 0x1000; // high slot, won't clash
+                entries.push({ binding: samplerBinding, visibility: vis, sampler: { type: 'filtering' } });
+                bindings[bindings.length - 1].cisCompanion = samplerBinding;
             }
         }
         let gpuLayout = null;
@@ -1184,23 +1281,23 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     }
 
     #allocateDescriptorSets(v, payload) {
-        // Rust-allocated handles sent as: count(u32@0) + sets[](setHandle:u64+layoutHandle:u64) = 4+n×16
-        const count = v.getUint32(0, true);
+        // C: dev(u64@0)+pool(u64@8)+count(u32@16)+[handle(u64)+layoutHandle(u64)]×n@20
+        const count = v.getUint32(16, true);
         for (let i = 0; i < count; i++) {
-            const setH    = v.getBigUint64(4 + i * 16,     true);
-            const layoutH = v.getBigUint64(4 + i * 16 + 8, true);
+            const setH    = v.getBigUint64(20 + i * 16,      true);
+            const layoutH = v.getBigUint64(20 + i * 16 + 8,  true);
             this.#descSets.set(setH, { layoutH, bindings: new Map(), gpuBindGroup: null });
         }
         return ok();
     }
 
     #updateDescriptorSets(v, payload) {
-        // payload: writeCount(u32@0) + writes[]
+        // C: dev(u64@0)+writeCount(u32@8)+writes[]
         // each write header: dstSet(u64)+dstBinding(u32)+dstArrayElement(u32)+count(u32)+dtype(u32) = 24 bytes
         // each buffer item:  bufH(u64)+offset(u64)+range(u64) = 24 bytes
-        // each image item:   imageViewH(u64)+samplerH(u64)+imageLayout(u32)+pad(u32) = 24 bytes
-        const writeCount = v.getUint32(0, true);
-        let off = 4;
+        // each image item:   samplerH(u64)+imageViewH(u64)+imageLayout(u32) = 20 bytes (padded to 24)
+        const writeCount = v.getUint32(8, true);
+        let off = 12;
         for (let i = 0; i < writeCount; i++) {
             const dstSetH    = v.getBigUint64(off, true); off += 8;
             const dstBinding = v.getUint32(off, true);    off += 4;
@@ -1221,10 +1318,10 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
                     const gpuRange = (range === 0n || range >= 0xFFFFFFFFn) ? undefined : Number(range);
                     if (ds) ds.bindings.set(slot, { type: 'buffer', bufH, offset: Number(bufOff), range: gpuRange });
                 } else {
-                    const ivH    = v.getBigUint64(off, true); off += 8;
+                    // C VkDescriptorImageInfo: sampler(ptr@0)+imageView(ptr@8)+imageLayout(u32@16) = 20B
                     const sampH  = v.getBigUint64(off, true); off += 8;
+                    const ivH    = v.getBigUint64(off, true); off += 8;
                     /*layout*/    v.getUint32(off, true);    off += 4;
-                    /*pad*/       v.getUint32(off, true);    off += 4;
                     if (ds) {
                         if (dtype === 1 /* COMBINED_IMAGE_SAMPLER */)
                             ds.bindings.set(slot, { type: 'cis', ivH, sampH });
@@ -1355,27 +1452,68 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     }
 
     // =========================================================================
+    // Command buffer recording (Issue 2 fix)
+    // =========================================================================
+
+    #beginCommandBuffer(v) {
+        // C: cb(u64@0)+flags(u32@8)
+        const cbH = v.getBigUint64(0, true);
+        this.#cmdBuffers.set(cbH, []); // start fresh recording
+        return ok();
+    }
+
+    #endCommandBuffer(v) {
+        // C: cb(u64@0) — recording is now complete; leave data in map for QueueSubmit
+        return ok();
+    }
+
+    #resetCommandBuffer(v) {
+        // C: cb(u64@0)+flags(u32@8)
+        const cbH = v.getBigUint64(0, true);
+        this.#cmdBuffers.set(cbH, []); // clear recording
+        return ok();
+    }
+
+    #recordCmd(op, payload) {
+        // Called for opcodes 0x0080–0x00AF during recording.
+        // payload[0..7] = cb handle (u64), payload[8..] = cb-stripped data.
+        if (payload.byteLength < 8) return ok();
+        const dv  = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+        const cbH = dv.getBigUint64(0, true);
+        const rec = this.#cmdBuffers.get(cbH);
+        if (rec) {
+            // Store op + cb-stripped payload
+            const stripped = payload.slice(8);
+            rec.push({ op, data: stripped });
+        }
+        return ok();
+    }
+
+    // =========================================================================
     // QUEUE_SUBMIT — the core frame path
     // =========================================================================
 
     #queueSubmit(v, payload) {
+        // C: queue(u64@0)+fence(u64@8)+submitCount(u32@16)
+        //    per submit: cmdBufCount(u32)+cmdBufHandles(u64×n)
+        const submitCount = v.getUint32(16, true);
         const enc   = this.#device.createCommandEncoder({ label: 'vk-frame' });
         const state = { enc, renderPass: null, computePass: null };
 
-        let off      = 0;
-        const count  = v.getUint32(off, true); off += 4;
-
-        for (let i = 0; i < count; i++) {
-            if (off + 8 > payload.byteLength) {
-                console.error('[VkWebGPUPlugin] QUEUE_SUBMIT payload truncated');
-                break;
+        let off = 20;
+        for (let s = 0; s < submitCount; s++) {
+            if (off + 4 > payload.byteLength) break;
+            const cbCount = v.getUint32(off, true); off += 4;
+            for (let c = 0; c < cbCount; c++) {
+                if (off + 8 > payload.byteLength) break;
+                const cbH = v.getBigUint64(off, true); off += 8;
+                const rec = this.#cmdBuffers.get(cbH);
+                if (!rec) { console.warn(`[VkWebGPUPlugin] QueueSubmit: no recording for cb=${cbH}`); continue; }
+                for (const { op, data } of rec) {
+                    const cv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+                    this.#replayCmd(state, op, cv, data);
+                }
             }
-            const opcode  = v.getUint32(off, true); off += 4;
-            const cmdLen  = v.getUint32(off, true); off += 4;
-            const cmdView = new DataView(payload.buffer, payload.byteOffset + off, cmdLen);
-            const cmdPayl = payload.subarray(off, off + cmdLen);
-            off += cmdLen;
-            this.#replayCmd(state, opcode, cmdView, cmdPayl);
         }
 
         if (state.renderPass)  state.renderPass.end();
@@ -1480,14 +1618,14 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 
         case FC_BIND_VERTEX_BUFFERS: {
             if (!rp) break;
+            // C after cb-strip: first(u32@0)+count(u32@4)+[buf(u64)+offset(u64)]×count @8
             const firstBind = v.getUint32(0, true);
             const count     = v.getUint32(4, true);
-            const handles   = [], offsets = [];
-            for (let i = 0; i < count; i++) handles.push(v.getBigUint64(8 + i * 8, true));
-            for (let i = 0; i < count; i++) offsets.push(v.getBigUint64(8 + count * 8 + i * 8, true));
             for (let i = 0; i < count; i++) {
-                const bi = this.#buffers.get(handles[i]);
-                if (bi?.gpuBuffer) rp.setVertexBuffer(firstBind + i, bi.gpuBuffer, Number(offsets[i]));
+                const bufH  = v.getBigUint64(8 + i * 16,     true);
+                const bOff  = v.getBigUint64(8 + i * 16 + 8, true);
+                const bi    = this.#buffers.get(bufH);
+                if (bi?.gpuBuffer) rp.setVertexBuffer(firstBind + i, bi.gpuBuffer, Number(bOff));
             }
             break;
         }
@@ -1520,13 +1658,12 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
         }
 
         case FC_PUSH_CONSTANTS: {
-            // layout(u64)+stageFlags(u32)+offset(u32)+size(u32)+dataLen(u32)+data
-            const pcOff  = v.getUint32(16, true);
-            const pcSize = v.getUint32(20, true);
-            const dataLen= v.getUint32(24, true);
-            const copyLen = Math.min(dataLen, 256 - pcOff);
+            // C after cb-strip: layout(u64@0)+stageFlags(u32@8)+offset(u32@12)+size(u32@16)+data@20
+            const pcOff  = v.getUint32(12, true);
+            const pcSize = v.getUint32(16, true);
+            const copyLen = Math.min(pcSize, 256 - pcOff);
             for (let i = 0; i < copyLen; i++)
-                this.#pushConstData[pcOff + i] = v.getUint8(28 + i);
+                this.#pushConstData[pcOff + i] = v.getUint8(20 + i);
             // Upload the full 256-byte push-constant block to the GPU uniform buffer.
             if (this.#pushConstBuffer)
                 this.#device.queue.writeBuffer(this.#pushConstBuffer, 0, this.#pushConstData);
@@ -1579,6 +1716,15 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
         case FC_DISPATCH: {
             if (!cp) break;
             cp.dispatchWorkgroups(v.getUint32(0,true), v.getUint32(4,true), v.getUint32(8,true));
+            break;
+        }
+
+        case FC_DISPATCH_INDIRECT: {
+            // C after cb-strip: buffer(u64@0)+offset(u64@8)
+            if (!cp) break;
+            const bi   = this.#buffers.get(v.getBigUint64(0, true));
+            const bOff = Number(v.getBigUint64(8, true));
+            if (bi?.gpuBuffer) cp.dispatchWorkgroupsIndirect(bi.gpuBuffer, bOff);
             break;
         }
 
@@ -1996,6 +2142,45 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 
         if (colorAttachments.length === 0 && !depthStencilAttachment) return null;
         return enc.beginRenderPass({ colorAttachments, depthStencilAttachment });
+    }
+
+    // =========================================================================
+    // Surface commands (Issue 4 fix)
+    // =========================================================================
+
+    #createSurface(v) {
+        // C: inst(u64@0)+handle(u64@8)+xcb_window(u32@16)
+        const h = v.getBigUint64(8, true);
+        this.#surfaces.set(h, {});
+        return ok(); // guest pre-allocated h; we just ack
+    }
+
+    #getSurfaceCaps() {
+        // Returns VkSurfaceCapabilitiesKHR (VK_MAX_SURFACE_FORMAT = fullstruct).
+        // The guest reads back a raw struct; we return the same layout the guest expects.
+        // VkSurfaceCapabilitiesKHR is 52 bytes:
+        //   minImageCount(u32)+maxImageCount(u32)+currentExtent{w,h}(u32×2)
+        //   +minImageExtent{w,h}(u32×2)+maxImageExtent{w,h}(u32×2)
+        //   +maxImageArrayLayers(u32)+supportedTransforms(u32)+currentTransform(u32)
+        //   +supportedCompositeAlpha(u32)+supportedUsageFlags(u32) = 13 u32 = 52 bytes
+        const w = this.#canvas?.width  ?? 1280;
+        const h = this.#canvas?.height ?? 720;
+        const resp = new Uint8Array(52);
+        const rv   = new DataView(resp.buffer);
+        rv.setUint32(0,  2,     true); // minImageCount
+        rv.setUint32(4,  3,     true); // maxImageCount
+        rv.setUint32(8,  w,     true); // currentExtent.width
+        rv.setUint32(12, h,     true); // currentExtent.height
+        rv.setUint32(16, 1,     true); // minImageExtent.width
+        rv.setUint32(20, 1,     true); // minImageExtent.height
+        rv.setUint32(24, 16384, true); // maxImageExtent.width
+        rv.setUint32(28, 16384, true); // maxImageExtent.height
+        rv.setUint32(32, 1,     true); // maxImageArrayLayers
+        rv.setUint32(36, 1,     true); // supportedTransforms: IDENTITY
+        rv.setUint32(40, 1,     true); // currentTransform: IDENTITY
+        rv.setUint32(44, 1,     true); // supportedCompositeAlpha: OPAQUE
+        rv.setUint32(48, 0x9F,  true); // supportedUsageFlags: all common bits
+        return { result: VK_SUCCESS, data: resp };
     }
 }
 
