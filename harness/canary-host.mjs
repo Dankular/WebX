@@ -648,6 +648,44 @@ export async function boot(canvas, consoleEl, statusEl) {
         }
     }
 
+    /* ── Lazy VFS miss resolver ─────────────────────────────────────────────── */
+    /*
+     * Each frame we drain VFS misses (paths that returned ENOENT) and try to
+     * resolve them from the ext2 image on demand.  Once fetched, the content
+     * is injected into the runtime via add_file() so the next access succeeds.
+     *
+     * Paths are deduplicated globally so each path is fetched at most once.
+     */
+    const vfsMissesInFlight = new Set();
+
+    function drainVfsMisses() {
+        let misses;
+        try { misses = rt.drain_vfs_misses(); } catch (_) { return; }
+        if (!misses || misses.length === 0) return;
+
+        for (let i = 0; i < misses.length; i++) {
+            const p = misses[i];
+            if (vfsMissesInFlight.has(p)) continue;
+            vfsMissesInFlight.add(p);
+
+            // Don't attempt to fetch /proc, /dev, /sys paths from ext2
+            if (p.startsWith('/proc/') || p.startsWith('/dev/') || p.startsWith('/sys/')) continue;
+
+            (async () => {
+                try {
+                    const data = await wasmMod.lookup_ext2_path(p);
+                    if (data && data.length > 0) {
+                        rt.add_file(p, data);
+                        console.log(`[WebX] Lazy VFS: injected ${p} (${data.length} bytes)`);
+                    }
+                    // If length==0 the path genuinely doesn't exist — leave the miss recorded.
+                } catch (e) {
+                    console.warn(`[WebX] Lazy VFS: failed to fetch ${p}:`, e);
+                }
+            })();
+        }
+    }
+
     /* ── Step loop (requestAnimationFrame-driven) ── */
     /*
      * Run guest instructions for FRAME_BUDGET_MS per animation frame.
@@ -672,6 +710,7 @@ export async function boot(canvas, consoleEl, statusEl) {
         drainIoPorts();
         drainCloneRequests();
         drainJitQueue();
+        drainVfsMisses();
         renderFramebuffer();
 
         if (alive) {

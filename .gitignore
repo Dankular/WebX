@@ -17,3 +17,7 @@ steam/libvkwebgpu.so
 # OS
 .DS_Store
 Thumbs.db
+steam/*.img
+steam/*.img.zst
+steam/*.qcow2
+steam/*.raw
