@@ -259,11 +259,16 @@ export async function boot(canvas, consoleEl, statusEl) {
         return { data, resolvedPath: fpath };
     }
 
-    setStatus('Prefetching boot binaries…');
-    // Fire all prefetches in parallel — lookup_ext2_path uses HTTP Range requests
-    // so the browser can pipeline them over HTTP/2 simultaneously.
+    const total = PREFETCH_PATHS.length;
+    let done = 0;
+    setStatus(`Fetching boot files: 0 / ${total}`);
+    // Fire all prefetches — they serialize through ext2Lookup but update status as each completes.
     const prefetchResults = await Promise.all(
-        PREFETCH_PATHS.map(fpath => fetchExt2Resolved(fpath).then(r => ({ fpath, r })))
+        PREFETCH_PATHS.map(fpath => fetchExt2Resolved(fpath).then(r => {
+            done++;
+            setStatus(`Fetching boot files: ${done} / ${total}`);
+            return { fpath, r };
+        }))
     );
     const prefetchSeen = new Set();
     let prefetched = 0;
@@ -283,7 +288,8 @@ export async function boot(canvas, consoleEl, statusEl) {
             prefetchSeen.add(fpath + '_logged');
         }
     }
-    console.log(`[WebX] Prefetch complete: ${prefetched}/${PREFETCH_PATHS.length} paths resolved.`);
+    const totalMB = (prefetchResults.reduce((sum, {r}) => sum + (r ? r.data.byteLength : 0), 0) / 1048576).toFixed(1);
+    console.log(`[WebX] Prefetch complete: ${prefetched}/${PREFETCH_PATHS.length} paths resolved — ${totalMB} MB transferred.`);
 
     /* ── VFS overlay: /proc stubs + Vulkan ICD ── */
     /*
