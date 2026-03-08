@@ -55,7 +55,20 @@ import { createGzip }                                     from 'node:zlib';
 import { networkInterfaces, tmpdir }                      from 'node:os';
 import { execFileSync }                                   from 'node:child_process';
 
+import * as Sentry from '@sentry/node';
+
 const HARNESS   = dirname(fileURLToPath(import.meta.url));
+// Sentry error monitoring
+Sentry.init({
+    dsn: 'https://1c4a4feca7200264db154982ce6ff0d5@o972642.ingest.us.sentry.io/4511009816182784',
+    tracesSampleRate: 0.1,
+    environment: process.env.NODE_ENV ?? 'production',
+    release: 'webx@0.1.0',
+});
+process.on('unhandledRejection', (reason) => Sentry.captureException(reason));
+process.on('uncaughtException',  (err)    => { Sentry.captureException(err); throw err; });
+
+
 const REPO_ROOT = resolve(join(HARNESS, '..'));
 const PORT      = 3000;
 
@@ -91,6 +104,19 @@ const TLS_CERT = readFileSync(join(tmpdir(), 'webx-dev-tls', 'cert.pem'), 'utf8'
  * Override with CANARY_PKG environment variable. */
 const CANARY_PKG = process.env.CANARY_PKG
     ?? resolve(REPO_ROOT, '..', 'Canary', 'crates', 'canary-wasm', 'pkg');
+
+
+// â”€â”€ Asset versioning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Version derived from WASM build timestamp so every `wasm-pack build`
+// automatically busts browser caches without manual intervention.
+import { statSync } from 'node:fs';
+function computeVersion() {
+    try {
+        const wasmPath = join(HARNESS, 'canary_wasm_bg.wasm');
+        return (statSync(wasmPath).mtimeMs | 0).toString(36);
+    } catch { return Date.now().toString(36); }
+}
+const ASSET_VERSION = computeVersion();
 
 const MIME = {
     '.html': 'text/html',
@@ -300,11 +326,8 @@ http2.createSecureServer({ allowHTTP1: true, key: TLS_KEY, cert: TLS_CERT }, asy
 
     // Never cache JS/WASM — always serve fresh so updates take effect immediately.
     const isScript = ['.js', '.mjs', '.wasm'].includes(extname(realFile));
-    if (isScript) {
-        if (req.headers['if-none-match'] === etag) {
-            res.writeHead(304); res.end(); return;
-        }
-    }
+    // Scripts always served fresh â€” never return 304 for JS/WASM
+    // so stale cached code can't survive a wasm-pack rebuild.
 
     if (isRange) {
         /* ── Range request (RFC 7233) ──────────────────────────────────────
@@ -490,7 +513,22 @@ http2.createSecureServer({ allowHTTP1: true, key: TLS_KEY, cert: TLS_CERT }, asy
             ...(isScript ? { 'Cache-Control': 'no-store' } : {}),
         });
 
-        const stream = createReadStream(realFile);
+        // Inject ASSET_VERSION into index.html so JS imports are cache-busted
+        let stream;
+        if (path === '/' || path === '/index.html' || realFile.endsWith('index.html')) {
+            const { readFileSync } = await import('node:fs');
+            let html = readFileSync(realFile, 'utf8');
+            html = html.replace(/canary-host\.mjs(?:\?v=[^'"]*)?/g, `canary-host.mjs?v=${ASSET_VERSION}`);
+            res.writeHead(200, {
+                ...CORS,
+                'Content-Type':   'text/html',
+                'Content-Length': Buffer.byteLength(html),
+                'Cache-Control':  'no-store',
+            });
+            res.end(html);
+            return;
+        }
+        stream = createReadStream(realFile);
 
         if (isLarge) {
             clog(client.uuid, 'SEND START',

@@ -18,5 +18,8 @@
   },
   "devDependencies": {
     "playwright": "^1.58.2"
+  },
+  "dependencies": {
+    "@sentry/node": "^10.42.0"
   }
 }

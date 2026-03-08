@@ -38,8 +38,22 @@
 import { VkBridge }  from './vk-bridge.mjs';
 import { loadPlugin } from './vkwebgpu-plugin.mjs';
 
+
+// Sentry integration - reports errors if Sentry SDK is loaded in the page
+function sentryCaptureError(msg, extra) {
+    try {
+        if (typeof Sentry !== 'undefined') {
+            Sentry.withScope(scope => {
+                if (extra) scope.setExtras(extra);
+                Sentry.captureMessage(msg, 'error');
+            });
+        }
+    } catch (_) {}
+}
+
 /* Canary WASM package — served from /canary/ by server.mjs */
-const CANARY_WASM_URL    = '/canary/canary_wasm.js';
+const _CANARY_V = Date.now();
+const CANARY_WASM_URL    = '/canary/canary_wasm.js?v='+_CANARY_V;
 const CANARY_WASM_BG_URL = '/canary/canary_wasm_bg.wasm';
 
 /* x86-64 SteamOS guest image (ext2, with libvkwebx.so pre-installed) */
@@ -81,11 +95,16 @@ const _wsMap = new Map();
 /* ── Boot ─────────────────────────────────────────────────────────────────── */
 
 export async function boot(canvas, consoleEl, statusEl) {
-    if (!navigator.gpu)
+    if (!navigator.gpu) {
+        sentryCaptureError('WebGPU not available', {});
         throw new Error('WebGPU not available. Use Chrome 113+, Edge 113+, or Firefox Nightly.');
+    }
 
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) throw new Error('No WebGPU adapter found.');
+    if (!adapter) {
+        sentryCaptureError('No WebGPU adapter found', {});
+        throw new Error('No WebGPU adapter found.');
+    }
 
     const deviceDesc = { requiredLimits: {} };
     if (adapter.features.has('texture-compression-bc'))
@@ -102,7 +121,7 @@ export async function boot(canvas, consoleEl, statusEl) {
     /* ── Load Canary WASM ── */
     console.log('[WebX] Loading Canary WASM…');
     const wasmMod = await import(/* @vite-ignore */ CANARY_WASM_URL);
-    const wasmInitResult = await wasmMod.default();
+    const wasmInitResult = await wasmMod.default(fetch('/canary/canary_wasm_bg.wasm?v='+_CANARY_V));
 
     /* Cache compiled module for sharing with thread Workers. */
     _wasmModule = wasmInitResult?.module ?? null;
@@ -696,6 +715,7 @@ export async function boot(canvas, consoleEl, statusEl) {
                 rt.register_compiled_block(rip, inst.exports.run);
             } catch (e) {
                 console.warn(`[WebX] JIT compile failed rip=0x${rip.toString(16)}:`, e.message);
+                sentryCaptureError(`[WebX] JIT compile failed rip=0x${rip.toString(16)}: ${e.message}`, { rip });
             }
         }
     }
