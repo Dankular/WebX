@@ -206,6 +206,17 @@ export async function boot(canvas, consoleEl, statusEl) {
         '/etc/ld.so.conf',
     ];
 
+    // Serialize all lookup_ext2_path calls — the Rust ext2 reader is a singleton
+    // that is taken out of thread-local storage during async operations.
+    // Concurrent calls would see it as None and fail.
+    let _ext2Lock = Promise.resolve();
+    function ext2Lookup(p) {
+        const result = _ext2Lock.then(() => wasmMod.lookup_ext2_path(p));
+        // Chain: next caller waits for this one to finish (inc. put-back).
+        _ext2Lock = result.then(() => {}, () => {});
+        return result;
+    }
+
     // Resolve a symlink target path relative to its symlink location.
     function resolveSymlinkTarget(symlinkPath, target) {
         if (target.startsWith('/')) return target;
@@ -224,7 +235,7 @@ export async function boot(canvas, consoleEl, statusEl) {
     async function fetchExt2Resolved(fpath, depth = 0) {
         if (depth > 4) return null;
         let data;
-        try { data = await wasmMod.lookup_ext2_path(fpath); }
+        try { data = await ext2Lookup(fpath); }
         catch (_) { return null; }
         if (!data || data.byteLength === 0) return null;
         // Heuristic: detect symlink targets.
@@ -249,26 +260,27 @@ export async function boot(canvas, consoleEl, statusEl) {
     }
 
     setStatus('Prefetching boot binaries…');
+    // Fire all prefetches in parallel — lookup_ext2_path uses HTTP Range requests
+    // so the browser can pipeline them over HTTP/2 simultaneously.
+    const prefetchResults = await Promise.all(
+        PREFETCH_PATHS.map(fpath => fetchExt2Resolved(fpath).then(r => ({ fpath, r })))
+    );
     const prefetchSeen = new Set();
     let prefetched = 0;
-    for (const fpath of PREFETCH_PATHS) {
-        if (prefetchSeen.has(fpath)) continue;
-        prefetchSeen.add(fpath);
-        const result = await fetchExt2Resolved(fpath);
-        if (result && result.data.byteLength > 0) {
+    for (const { fpath, r: result } of prefetchResults) {
+        if (!result || result.data.byteLength === 0) { console.debug(`[WebX] prefetch skip: ${fpath}`); continue; }
+        if (!prefetchSeen.has(fpath)) {
             rt.add_file(fpath, result.data);
-            // Also register under the real resolved path (e.g. libreadline.so.8.2 when
-            // fetched via the libreadline.so.8 symlink) so the VFS serves it under both names.
-            if (result.resolvedPath !== fpath && !prefetchSeen.has(result.resolvedPath)) {
-                rt.add_file(result.resolvedPath, result.data);
-                prefetchSeen.add(result.resolvedPath);
-                console.log(`[WebX] prefetched ${fpath} → ${result.resolvedPath} (${result.data.byteLength} bytes)`);
-            } else {
-                console.log(`[WebX] prefetched ${fpath} (${result.data.byteLength} bytes)`);
-            }
+            prefetchSeen.add(fpath);
             prefetched++;
-        } else {
-            console.debug(`[WebX] prefetch skip: ${fpath}`);
+        }
+        if (result.resolvedPath !== fpath && !prefetchSeen.has(result.resolvedPath)) {
+            rt.add_file(result.resolvedPath, result.data);
+            prefetchSeen.add(result.resolvedPath);
+            console.log(`[WebX] prefetched ${fpath} → ${result.resolvedPath} (${result.data.byteLength} bytes)`);
+        } else if (!prefetchSeen.has(fpath + '_logged')) {
+            console.log(`[WebX] prefetched ${fpath} (${result.data.byteLength} bytes)`);
+            prefetchSeen.add(fpath + '_logged');
         }
     }
     console.log(`[WebX] Prefetch complete: ${prefetched}/${PREFETCH_PATHS.length} paths resolved.`);
@@ -673,7 +685,7 @@ export async function boot(canvas, consoleEl, statusEl) {
 
             (async () => {
                 try {
-                    const data = await wasmMod.lookup_ext2_path(p);
+                    const data = await ext2Lookup(p);
                     if (data && data.length > 0) {
                         rt.add_file(p, data);
                         console.log(`[WebX] Lazy VFS: injected ${p} (${data.length} bytes)`);
