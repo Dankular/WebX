@@ -164,7 +164,10 @@ export async function boot(canvas, consoleEl, statusEl) {
     console.log('[WebX] VFS populated from ext2 image via lazy block loading.');
 
     /* ── Launch target (declared here so VFS overlay below can reference it) ── */
-    const LAUNCH_BIN  = '/bin/bash';
+    // SteamOS/Arch: /bin is a relative symlink → usr/bin. Try resolved path first.
+    const LAUNCH_BIN  = rt.path_exists('/usr/bin/bash') ? '/usr/bin/bash'
+                      : rt.path_exists('/bin/bash')     ? '/bin/bash'
+                      : '/usr/bin/bash'; // fallback
     const LAUNCH_ARGS = ['/opt/webx/launch.sh'];
 
     /* ── Prefetch critical binaries from ext2 image ──────────────────────────
@@ -179,7 +182,7 @@ export async function boot(canvas, consoleEl, statusEl) {
     const PREFETCH_PATHS = [
         // Shell + dynamic linker
         // SteamOS 3.x (Arch-based): /lib → /usr/lib, so real paths are under /usr/lib
-        '/usr/bin/bash',
+        '/usr/bin/bash',  // SteamOS/Arch: /bin → usr/bin (relative symlink)
         '/bin/bash',
         '/usr/lib/ld-linux-x86-64.so.2',          // Arch/SteamOS
         '/usr/lib64/ld-linux-x86-64.so.2',         // Fedora/RHEL style
