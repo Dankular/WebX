@@ -295,7 +295,16 @@ http2.createSecureServer({ allowHTTP1: true, key: TLS_KEY, cert: TLS_CERT }, asy
 
     const contentType  = MIME[extname(realFile)] ?? 'application/octet-stream';
     const lastModified = fileStat.mtime.toUTCString();  /* Required by HttpBytesDevice */
+    const etag         = `"${fileStat.size}-${fileStat.mtimeMs | 0}"`;
     const reqStart     = Date.now();
+
+    // Never cache JS/WASM — always serve fresh so updates take effect immediately.
+    const isScript = ['.js', '.mjs', '.wasm'].includes(extname(realFile));
+    if (isScript) {
+        if (req.headers['if-none-match'] === etag) {
+            res.writeHead(304); res.end(); return;
+        }
+    }
 
     if (isRange) {
         /* ── Range request (RFC 7233) ──────────────────────────────────────
@@ -477,6 +486,8 @@ http2.createSecureServer({ allowHTTP1: true, key: TLS_KEY, cert: TLS_CERT }, asy
             'Content-Length': String(fileStat.size),
             'Accept-Ranges':  'bytes',
             'Last-Modified':  lastModified,
+            'ETag':           etag,
+            ...(isScript ? { 'Cache-Control': 'no-store' } : {}),
         });
 
         const stream = createReadStream(realFile);
