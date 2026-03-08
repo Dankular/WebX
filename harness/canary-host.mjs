@@ -224,7 +224,7 @@ export async function boot(canvas, consoleEl, statusEl) {
     async function fetchExt2Resolved(fpath, depth = 0) {
         if (depth > 4) return null;
         let data;
-        try { data = await wasmMod.fetch_ext2_file(fpath); }
+        try { data = await wasmMod.lookup_ext2_path(fpath); }
         catch (_) { return null; }
         if (!data || data.byteLength === 0) return null;
         // Heuristic: detect symlink targets.
