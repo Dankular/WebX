@@ -621,6 +621,37 @@ export async function boot(canvas, consoleEl, statusEl) {
     if (!elfBytes || elfBytes.length === 0)
         throw new Error(`Canary VFS: read_file('${LAUNCH_BIN}') returned empty.`);
 
+    /* ── Parse PT_INTERP and ensure the dynamic linker is in the VFS ── */
+    // ELF64 PT_INTERP = segment type 3; e_phoff@32, e_phentsize@54, e_phnum@56
+    async function ensureInterpreter(bytes) {
+        const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        if (bytes[0] !== 0x7f || bytes[1] !== 69) return; // not ELF
+        const phoff    = Number(v.getBigUint64(32, true));
+        const phentsz  = v.getUint16(54, true);
+        const phnum    = v.getUint16(56, true);
+        for (let i = 0; i < phnum; i++) {
+            const off  = phoff + i * phentsz;
+            if (v.getUint32(off, true) !== 3) continue; // PT_INTERP
+            const foff = Number(v.getBigUint64(off + 8, true));
+            const fsz  = Number(v.getBigUint64(off + 32, true));
+            const interp = new TextDecoder().decode(bytes.slice(foff, foff + fsz)).replace(/ /g, '');
+            console.log(`[WebX] ELF interpreter: ${interp}`);
+            if (rt.path_exists(interp)) return; // already in VFS
+            setStatus(`Fetching interpreter: ${interp}…`);
+            // Fetch from ext2, following symlinks (e.g. /lib64 → usr/lib on Arch)
+            const result = await fetchExt2Resolved(interp);
+            if (result && result.data.byteLength > 0) {
+                rt.add_file(interp, result.data);
+                if (result.resolvedPath !== interp) rt.add_file(result.resolvedPath, result.data);
+                console.log(`[WebX] Interpreter injected: ${interp} (${result.data.byteLength} bytes)`);
+            } else {
+                console.warn(`[WebX] Could not fetch interpreter: ${interp}`);
+            }
+            return;
+        }
+    }
+    await ensureInterpreter(elfBytes);
+
     const argvJson = JSON.stringify([LAUNCH_BIN, ...LAUNCH_ARGS]);
     const envpJson = JSON.stringify(env);
 
