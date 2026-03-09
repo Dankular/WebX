@@ -384,14 +384,24 @@ export async function boot(canvas, consoleEl, statusEl) {
 
     /* ── Console output (drain stdout/stderr each frame) ── */
     const dec = new TextDecoder();
+    let _outBuf = '';
     function drainOutput() {
         const out = rt.drain_stdout();
         const err = rt.drain_stderr();
         const both = new Uint8Array(out.length + err.length);
         both.set(out);
         both.set(err, out.length);
-        if (both.length > 0 && consoleEl)
-            consoleEl.textContent += dec.decode(both);
+        if (both.length > 0) {
+            const text = dec.decode(both);
+            if (consoleEl) consoleEl.textContent += text;
+            // Forward to browser console line-by-line so Playwright/DevTools can see it
+            _outBuf += text;
+            let nl;
+            while ((nl = _outBuf.indexOf('\n')) !== -1) {
+                console.log('[guest] ' + _outBuf.slice(0, nl));
+                _outBuf = _outBuf.slice(nl + 1);
+            }
+        }
     }
 
     /* ── Framebuffer rendering (/dev/fb0 → HTML canvas) ── */
