@@ -243,11 +243,14 @@ export async function boot(canvas, consoleEl, statusEl) {
         if (_ext2Queue.length === 0) { _ext2Running = false; return; }
         _ext2Running = true;
         const { p, resolve, reject } = _ext2Queue.shift();
+        const t0 = performance.now();
         const timeout = new Promise((_, rej) =>
             setTimeout(() => rej(new Error(`ext2 lookup timeout: ${p}`)), 30000));
-        Promise.race([wasmMod.lookup_ext2_path(p), timeout])
-            .then(v => { resolve(v); _ext2RunNext(); },
-                  e => { reject(e);  _ext2RunNext(); });
+        const wasm_p = wasmMod.lookup_ext2_path(p);
+        console.log(`[Q] starting ${p} qlen=${_ext2Queue.length}`);
+        Promise.race([wasm_p, timeout])
+            .then(v  => { console.log(`[Q] done ${p} bytes=${v?.byteLength ?? '?'} dt=${(performance.now()-t0).toFixed(0)}ms`); resolve(v); _ext2RunNext(); },
+                  e  => { console.log(`[Q] err  ${p} ${e} dt=${(performance.now()-t0).toFixed(0)}ms`);  reject(e);  _ext2RunNext(); });
     }
 
     function ext2Lookup(p) {
