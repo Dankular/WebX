@@ -224,7 +224,9 @@ export async function boot(canvas, consoleEl, statusEl) {
         // nsswitch / passwd (glibc reads these early)
         '/etc/nsswitch.conf',
         '/etc/passwd',
-        '/etc/ld.so.cache',
+        // Note: /etc/ld.so.cache is intentionally excluded — its data blocks sit at
+        // ~5.5 GB into the ext2 image, causing intermittent fetch hangs in some browsers.
+        // ld-linux falls back to /etc/ld.so.conf and default library paths when absent.
         '/etc/ld.so.conf',
     ];
 
@@ -233,7 +235,14 @@ export async function boot(canvas, consoleEl, statusEl) {
     // Concurrent calls would see it as None and fail.
     let _ext2Lock = Promise.resolve();
     function ext2Lookup(p) {
-        const result = _ext2Lock.then(() => wasmMod.lookup_ext2_path(p));
+        // 12-second timeout per lookup — prevents hung fetches (large files with data
+        // blocks at huge ext2 offsets) from blocking the entire serialized chain.
+        const result = _ext2Lock.then(() => {
+            const fetch = wasmMod.lookup_ext2_path(p);
+            const timeout = new Promise((_, rej) =>
+                setTimeout(() => rej(new Error(`ext2 lookup timeout: ${p}`)), 12000));
+            return Promise.race([fetch, timeout]);
+        });
         // Chain: next caller waits for this one to finish (inc. put-back).
         _ext2Lock = result.then(() => {}, () => {});
         return result;
@@ -750,8 +759,10 @@ export async function boot(canvas, consoleEl, statusEl) {
             if (vfsMissesInFlight.has(p)) continue;
             vfsMissesInFlight.add(p);
 
-            // Don't attempt to fetch /proc, /dev, /sys paths from ext2
+            // Don't attempt to fetch /proc, /dev, /sys paths from ext2, or ld.so.cache
+            // (whose blocks are at ~5.5 GB in the image causing browser fetch hangs).
             if (p.startsWith('/proc/') || p.startsWith('/dev/') || p.startsWith('/sys/')) continue;
+            if (p === '/etc/ld.so.cache') continue;
 
             (async () => {
                 try {
