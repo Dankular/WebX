@@ -235,12 +235,12 @@ export async function boot(canvas, consoleEl, statusEl) {
     // Concurrent calls would see it as None and fail.
     let _ext2Lock = Promise.resolve();
     function ext2Lookup(p) {
-        // 12-second timeout per lookup — prevents hung fetches (large files with data
+        // 30-second timeout per lookup — prevents hung fetches (large files with data
         // blocks at huge ext2 offsets) from blocking the entire serialized chain.
         const result = _ext2Lock.then(() => {
             const fetch = wasmMod.lookup_ext2_path(p);
             const timeout = new Promise((_, rej) =>
-                setTimeout(() => rej(new Error(`ext2 lookup timeout: ${p}`)), 12000));
+                setTimeout(() => rej(new Error(`ext2 lookup timeout: ${p}`)), 30000));
             return Promise.race([fetch, timeout]);
         });
         // Chain: next caller waits for this one to finish (inc. put-back).
