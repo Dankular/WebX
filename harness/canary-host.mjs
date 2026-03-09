@@ -244,13 +244,28 @@ export async function boot(canvas, consoleEl, statusEl) {
         _ext2Running = true;
         const { p, resolve, reject } = _ext2Queue.shift();
         const t0 = performance.now();
-        const timeout = new Promise((_, rej) =>
-            setTimeout(() => rej(new Error(`ext2 lookup timeout: ${p}`)), 30000));
-        const wasm_p = wasmMod.lookup_ext2_path(p);
-        console.log(`[Q] starting ${p} qlen=${_ext2Queue.length}`);
-        Promise.race([wasm_p, timeout])
-            .then(v  => { console.log(`[Q] done ${p} bytes=${v?.byteLength ?? '?'} dt=${(performance.now()-t0).toFixed(0)}ms`); resolve(v); _ext2RunNext(); },
-                  e  => { console.log(`[Q] err  ${p} ${e} dt=${(performance.now()-t0).toFixed(0)}ms`);  reject(e);  _ext2RunNext(); });
+        const TIMEOUT_MS = 120_000;  // 2 min — large files can take a long time on cold cache
+        const TIMED_OUT  = Symbol('timeout');
+        const timeout_p  = new Promise(res => setTimeout(() => res(TIMED_OUT), TIMEOUT_MS));
+        const wasm_p     = wasmMod.lookup_ext2_path(p);
+
+        Promise.race([wasm_p, timeout_p]).then(val => {
+            if (val === TIMED_OUT) {
+                // Timeout — tell the caller, but MUST wait for the WASM future to complete
+                // before proceeding, because the Rust reader is still held by the ongoing future.
+                console.warn(`[Q] timeout ${p} after ${TIMEOUT_MS}ms — waiting for reader release`);
+                reject(new Error(`ext2 lookup timeout: ${p}`));
+                wasm_p.then(() => _ext2RunNext(), () => _ext2RunNext());
+            } else {
+                console.log(`[Q] done ${p} bytes=${val?.byteLength ?? '?'} dt=${(performance.now()-t0).toFixed(0)}ms`);
+                resolve(val);
+                _ext2RunNext();
+            }
+        }, e => {
+            console.log(`[Q] err ${p} ${e} dt=${(performance.now()-t0).toFixed(0)}ms`);
+            reject(e);
+            _ext2RunNext();
+        });
     }
 
     function ext2Lookup(p) {
