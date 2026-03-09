@@ -503,6 +503,21 @@ http2.createSecureServer({ allowHTTP1: true, key: TLS_KEY, cert: TLS_CERT }, asy
         /* ── Normal (non-range, non-image) response ────────────────────────
          * Stream the file to avoid loading large assets into memory.
          */
+        // Inject ASSET_VERSION into index.html so JS imports are cache-busted
+        let stream;
+        if (realFile.endsWith('index.html')) {
+            let html = readFileSync(realFile, 'utf8');
+            html = html.replace(/canary-host\.mjs(?:\?v=[^'"]*)?/g, `canary-host.mjs?v=${ASSET_VERSION}`);
+            res.writeHead(200, {
+                ...CORS,
+                'Content-Type':   'text/html',
+                'Content-Length': String(Buffer.byteLength(html)),
+                'Cache-Control':  'no-store',
+            });
+            res.end(html);
+            return;
+        }
+
         res.writeHead(200, {
             ...CORS,
             'Content-Type':   contentType,
@@ -513,21 +528,6 @@ http2.createSecureServer({ allowHTTP1: true, key: TLS_KEY, cert: TLS_CERT }, asy
             ...(isScript ? { 'Cache-Control': 'no-store' } : {}),
         });
 
-        // Inject ASSET_VERSION into index.html so JS imports are cache-busted
-        let stream;
-        if (path === '/' || path === '/index.html' || realFile.endsWith('index.html')) {
-            const { readFileSync } = await import('node:fs');
-            let html = readFileSync(realFile, 'utf8');
-            html = html.replace(/canary-host\.mjs(?:\?v=[^'"]*)?/g, `canary-host.mjs?v=${ASSET_VERSION}`);
-            res.writeHead(200, {
-                ...CORS,
-                'Content-Type':   'text/html',
-                'Content-Length': Buffer.byteLength(html),
-                'Cache-Control':  'no-store',
-            });
-            res.end(html);
-            return;
-        }
         stream = createReadStream(realFile);
 
         if (isLarge) {
