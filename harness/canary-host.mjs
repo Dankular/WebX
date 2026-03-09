@@ -239,6 +239,11 @@ export async function boot(canvas, consoleEl, statusEl) {
         // blocks at huge ext2 offsets) from blocking the entire serialized chain.
         const result = _ext2Lock.then(() => {
             const fetch = wasmMod.lookup_ext2_path(p);
+            console.log('[DBG ext2] path=' + p + ' typeof=' + typeof fetch + ' isPromise=' + (fetch instanceof Promise) + ' val=' + fetch);
+            if (!(fetch instanceof Promise)) {
+                console.error('[DBG ext2] NOT A PROMISE — returning immediately with empty data');
+                return new Uint8Array(0);
+            }
             const timeout = new Promise((_, rej) =>
                 setTimeout(() => rej(new Error(`ext2 lookup timeout: ${p}`)), 30000));
             return Promise.race([fetch, timeout]);
