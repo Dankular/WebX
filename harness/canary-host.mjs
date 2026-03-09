@@ -233,24 +233,28 @@ export async function boot(canvas, consoleEl, statusEl) {
     // Serialize all lookup_ext2_path calls — the Rust ext2 reader is a singleton
     // that is taken out of thread-local storage during async operations.
     // Concurrent calls would see it as None and fail.
-    let _ext2Lock = Promise.resolve();
+    //
+    // Uses a queue-based mutex: each caller enqueues itself and waits for the
+    // previous caller to signal completion before starting its lookup.
+    const _ext2Queue = [];
+    let   _ext2Running = false;
+
+    function _ext2RunNext() {
+        if (_ext2Queue.length === 0) { _ext2Running = false; return; }
+        _ext2Running = true;
+        const { p, resolve, reject } = _ext2Queue.shift();
+        const timeout = new Promise((_, rej) =>
+            setTimeout(() => rej(new Error(`ext2 lookup timeout: ${p}`)), 30000));
+        Promise.race([wasmMod.lookup_ext2_path(p), timeout])
+            .then(v => { resolve(v); _ext2RunNext(); },
+                  e => { reject(e);  _ext2RunNext(); });
+    }
+
     function ext2Lookup(p) {
-        // 30-second timeout per lookup — prevents hung fetches (large files with data
-        // blocks at huge ext2 offsets) from blocking the entire serialized chain.
-        const result = _ext2Lock.then(() => {
-            const fetch = wasmMod.lookup_ext2_path(p);
-            console.log('[DBG ext2] path=' + p + ' typeof=' + typeof fetch + ' isPromise=' + (fetch instanceof Promise) + ' val=' + fetch);
-            if (!(fetch instanceof Promise)) {
-                console.error('[DBG ext2] NOT A PROMISE — returning immediately with empty data');
-                return new Uint8Array(0);
-            }
-            const timeout = new Promise((_, rej) =>
-                setTimeout(() => rej(new Error(`ext2 lookup timeout: ${p}`)), 30000));
-            return Promise.race([fetch, timeout]);
+        return new Promise((resolve, reject) => {
+            _ext2Queue.push({ p, resolve, reject });
+            if (!_ext2Running) _ext2RunNext();
         });
-        // Chain: next caller waits for this one to finish (inc. put-back).
-        _ext2Lock = result.then(() => {}, () => {});
-        return result;
     }
 
     // Resolve a symlink target path relative to its symlink location.
