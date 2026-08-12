@@ -37,6 +37,7 @@
 
 import { VkBridge }  from './vk-bridge.mjs';
 import { loadPlugin } from './vkwebgpu-plugin.mjs';
+import { detectMemory64, describeMemory64 } from './memory64.mjs';
 
 
 // Sentry integration - reports errors if Sentry SDK is loaded in the page
@@ -152,6 +153,31 @@ export async function boot(canvas, consoleEl, statusEl) {
     const { CanaryRuntime } = wasmMod;
     const rt = new CanaryRuntime();
     console.log('[WebX] Canary runtime ready.');
+
+    /* ── memory64 capability probe ──────────────────────────────────────────
+     * Canary's guest RAM is currently capped at 4 GiB total (wasm32 linear
+     * memory) regardless of what we advertise to the guest — see
+     * ../../Canary/docs/memory64-status.md. Log the browser's actual
+     * memory64 ceiling for visibility, and only raise the guest-advertised
+     * RAM figure above Canary's conservative built-in default (3 GiB) when
+     * the browser confirms there's real headroom to back it. Guarded with
+     * try/catch: set_guest_ram_bytes() is only present on Canary builds that
+     * include it (see harness/memory64.mjs for the full rationale).
+     */
+    const mem64 = detectMemory64();
+    console.log(`[WebX] ${describeMemory64(mem64)}`);
+    if (mem64.beyondWasm32 && typeof rt.set_guest_ram_bytes === 'function') {
+        // Conservative fraction of the probed ceiling — leaves headroom for
+        // Canary's own Rust heap/JIT cache sharing the same instance.
+        const advertiseBytes = Math.floor(mem64.ceilingBytes * 0.75);
+        try {
+            rt.set_guest_ram_bytes(BigInt(advertiseBytes));
+            console.log(`[WebX] Guest-advertised RAM raised to ` +
+                `${(advertiseBytes / (1024 ** 3)).toFixed(1)} GiB.`);
+        } catch (e) {
+            console.warn('[WebX] set_guest_ram_bytes failed, keeping Canary default:', e);
+        }
+    }
 
     /* ── Lazy-load SteamOS ext2/ext4 filesystem via HTTP Range requests ── */
     /*

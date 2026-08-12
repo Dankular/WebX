@@ -110,6 +110,7 @@ See `protocol/wire-format.md` for full spec.
 | `harness/canary-host.mjs` | Canary boot, image mount, IPC doorbell, framebuffer blit |
 | `harness/vk-bridge.mjs` | Packet accumulator → plugin dispatcher → response queue |
 | `harness/vkwebgpu-plugin.mjs` | VkWebGPU-ICD stub (placeholder WebGPU frame render) |
+| `harness/memory64.mjs` | Browser memory64 capability probe (see status doc in Canary repo) |
 | `steam/launch.sh` | /opt/webx/launch.sh inside SteamOS: Xorg (fbdev) + Proton |
 | `steam/extract-image.py` | Windows-native: decompress .bz2 + extract GPT rootfs partition |
 | `steam/extract-rootfs.sh` | Linux/WSL: loop mount, install ICD, ext4→ext2 |
@@ -150,6 +151,37 @@ steam/steamos-rootfs.img     ~5,120 MB  ← rootfs partition extracted         �
 | extract-rootfs.sh (ICD install + ext4→ext2) | 🔄 Running in WSL Ubuntu |
 | `steam/steamos-webx.ext2` | ⏳ Pending extract-rootfs.sh |
 | `npm run dev` | ⏳ Pending steamos-webx.ext2 |
+
+## memory64 / Proton large-address support (2026-08-12)
+
+Investigated adding native memory64 support so Proton/DXVK/VKD3D games
+aren't capped by Canary's 4 GiB wasm32 linear memory. Full findings in
+`../Canary/docs/memory64-status.md`. Short version: **not achievable yet**
+— two independent upstream gaps, neither fixable from either repo:
+
+- wasm-bindgen 0.2.111's JS-interop codegen is hardcoded to
+  `target_arch = "wasm32"` and silently no-ops on `wasm64-unknown-unknown`
+  (the build links but exports nothing usable), even though the core
+  emulator crates themselves compile fine for that target.
+- Chromium (verified: 141) still clamps a plain webpage's
+  `WebAssembly.Memory` to the wasm32 4 GiB ceiling even under the memory64
+  proposal — a browser policy default, not a spec limit, but not something
+  either repo can change.
+
+What did ship, independent of the above:
+
+- **Canary**: `sysinfo(2)` / `/proc/meminfo` guest RAM figures were
+  hardcoded in two places and could drift; now a single named constant
+  (`canary_fs::DEFAULT_TOTAL_RAM_BYTES`, unchanged at 3 GiB — do not raise
+  without genuine >4 GiB backing, see the doc comment) with a JS-settable
+  override (`CanaryRuntime.set_guest_ram_bytes()`).
+- **WebX**: `harness/memory64.mjs` — a cheap, zero-allocation browser
+  capability probe (`detectMemory64()`) wired into `canary-host.mjs`'s
+  boot sequence. Logs the browser's actual memory64 ceiling and only calls
+  `set_guest_ram_bytes()` above Canary's default if the probe confirms
+  there's real headroom (today it never does — see above). This is the
+  hook to flip on the moment both upstream gaps close; re-run the checks
+  in `Canary/docs/memory64-status.md` periodically to know when that is.
 
 ## Current Blockers
 
