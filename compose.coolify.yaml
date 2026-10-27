@@ -15,6 +15,12 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
   proxy:
     build:
       context: .
@@ -23,5 +29,11 @@ services:
     depends_on:
       webx:
         condition: service_healthy
+    mem_limit: 64m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
 volumes:
   images: {}
